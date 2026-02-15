@@ -1,0 +1,42 @@
+# Data files
+Data/
+*.dat
+
+# Figures
+figures/
+
+# Sorter outputs
+test_output/
+test_output_mps/
+**/sorter_output/
+**/kilosort*/
+**/spykingcircus*/
+**/tridesclous*/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
