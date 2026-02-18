@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from .packet import detect_format
+from .packet import detect_format, extract_imu
 from .recording import SpikeGadgetsNPXRecording
 
 
@@ -59,7 +59,7 @@ def load_all_segments(data_dir, file_pattern="*.dat", probe_part_number="NP1032"
 
     recordings = {}
     for fpath in dat_files:
-        bank, _, _ = detect_format(fpath)
+        bank, _, _, _ = detect_format(fpath)
         rec = SpikeGadgetsNPXRecording(
             fpath, probe_part_number=probe_part_number, attach_probe=attach_probe
         )
@@ -112,3 +112,31 @@ def load_concatenated(data_dir, file_pattern="*.dat", probe_part_number="NP1032"
         trimmed.append(rec)
 
     return aggregate_channels(trimmed)
+
+
+def load_imu(file_path):
+    """Extract IMU data (accelerometer, gyroscope, magnetometer) from a .dat file.
+
+    Only works with IMU-enabled firmware recordings (magic 0x1655). The IMU
+    data is multiplexed in the packet headers at 2500 Hz (30 kHz / 12-packet cycle).
+
+    Parameters
+    ----------
+    file_path : str or Path
+        Path to a .dat file recorded with IMU-enabled firmware.
+
+    Returns
+    -------
+    dict with keys:
+        - "accel": np.ndarray, shape (N, 3), int16 — accelerometer X, Y, Z
+        - "gyro":  np.ndarray, shape (N, 3), int16 — gyroscope X, Y, Z
+        - "mag":   np.ndarray, shape (N, 3), int16 — magnetometer X, Y, Z
+        - "sampling_rate": float — 2500.0 Hz
+        - "channels": list[str] — channel names
+
+    Raises
+    ------
+    ValueError
+        If the file does not use IMU-enabled firmware.
+    """
+    return extract_imu(file_path)

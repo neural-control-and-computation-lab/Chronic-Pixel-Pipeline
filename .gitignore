@@ -1,8 +1,9 @@
 # Data files
 Data/
 *.dat
+*.trodesconf
 
-# Figures
+# Figures (generated output)
 figures/
 
 # Sorter outputs

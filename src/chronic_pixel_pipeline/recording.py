@@ -87,7 +87,7 @@ class SpikeGadgetsNPXRecording(BaseRecording):
 
     def __init__(self, file_path, probe_part_number="NP1032", attach_probe=True):
         file_path = Path(file_path)
-        bank_number, n_channels, packet_size = detect_format(file_path)
+        bank_number, n_channels, packet_size, _has_imu = detect_format(file_path)
 
         # Channel IDs = electrode IDs on the probe
         channel_ids = np.arange(

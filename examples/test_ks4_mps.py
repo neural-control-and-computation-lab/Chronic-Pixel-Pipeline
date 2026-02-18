@@ -1,4 +1,8 @@
-"""Test Kilosort 4 on MPS (Apple Silicon GPU)."""
+"""Test Kilosort 4 on MPS (Apple Silicon GPU).
+
+Usage (from project root):
+    python examples/test_ks4_mps.py
+"""
 
 import os
 os.environ['OMP_NUM_THREADS'] = '1'

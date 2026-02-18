@@ -3,8 +3,8 @@
 Loads KS4 results, builds a SortingAnalyzer with quality metrics,
 classifies units, and saves summary figures.
 
-Usage:
-    python analyze_sorting.py
+Usage (from project root):
+    python examples/analyze_sorting.py
 """
 
 import os
