@@ -75,6 +75,22 @@ class SpikeGadgetsNPXRecording(BaseRecording):
     Channel IDs are set to electrode IDs on the probe: bank * 384 + channel_index,
     so they map directly to physical electrode positions.
 
+    µV scaling
+    ----------
+    The Neuropixels 1.0 ASIC has a 10-bit SAR ADC with Vref = 0.6V.
+    SpikeGadgets stores the 10-bit codes left-shifted by 6 in int16
+    (all raw values are multiples of 64).
+
+    Conversion: µV = raw_int16 × Vref / (2^16 × ap_gain) × 1e6
+                   = raw_int16 × 600000 / (65536 × ap_gain)
+
+    At gain 1000: µV/bit = 0.009155 ... wait, let me recalculate:
+    µV = (raw / 64) × (1200000 / 1024) / gain
+       = raw × 1200000 / (64 × 1024 × gain)
+       = raw × 1200000 / (65536 × gain)
+
+    At gain 1000: µV/bit = 1200000 / (65536 × 1000) = 0.018311 µV/bit
+
     Parameters
     ----------
     file_path : str or Path
@@ -83,9 +99,18 @@ class SpikeGadgetsNPXRecording(BaseRecording):
         Neuropixels probe part number for geometry. Default "NP1032".
     attach_probe : bool
         If True and probeinterface is installed, attach probe geometry.
+    ap_gain : int
+        Neuropixels AP band gain setting. Default 1000.
+        Common values: 50, 125, 250, 500, 1000, 1500, 2000, 3000.
     """
 
-    def __init__(self, file_path, probe_part_number="NP1032", attach_probe=True):
+    # NP1.0 ADC reference: full-scale is 1.2V (±0.6V bipolar), 10-bit → 1024 codes
+    # Data is left-shifted by 6 bits in int16, so effective divisor is 64 × 1024 = 65536
+    _VREF_UV = 1_200_000.0  # 1.2V in µV (full ADC range)
+    _ADC_RANGE = 65536.0     # 2^16 (10-bit left-shifted by 6)
+
+    def __init__(self, file_path, probe_part_number="NP1032", attach_probe=True,
+                 ap_gain=1000):
         file_path = Path(file_path)
         bank_number, n_channels, packet_size, _has_imu = detect_format(file_path)
 
@@ -107,11 +132,17 @@ class SpikeGadgetsNPXRecording(BaseRecording):
         )
         self.add_recording_segment(segment)
 
+        # ── µV scaling ─────────────────────────────────────────────────
+        uv_per_bit = self._VREF_UV / (self._ADC_RANGE * ap_gain)
+        self.set_channel_gains(gains=np.full(n_channels, uv_per_bit))
+        self.set_channel_offsets(offsets=np.zeros(n_channels))
+
         # Store for SpikeInterface serialization
         self._kwargs = {
             "file_path": str(file_path),
             "probe_part_number": probe_part_number,
             "attach_probe": attach_probe,
+            "ap_gain": ap_gain,
         }
 
         self.annotate(is_filtered=False)
@@ -120,6 +151,8 @@ class SpikeGadgetsNPXRecording(BaseRecording):
 
         self._bank_number = bank_number
         self._n_channels = n_channels
+        self._ap_gain = ap_gain
+        self._uv_per_bit = uv_per_bit
 
         if attach_probe:
             try:

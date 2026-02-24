@@ -7,8 +7,14 @@ import numpy as np
 
 # --- Format constants ---
 MAGIC_STANDARD = 0x1155  # Standard firmware (no IMU)
-MAGIC_IMU = 0x1655       # IMU-enabled firmware (accel/gyro/mag)
-VALID_MAGICS = {MAGIC_STANDARD, MAGIC_IMU}
+MAGIC_IMU = 0x1655       # IMU-enabled firmware v1 (accel/gyro/mag)
+MAGIC_IMU_V2 = 0x1755    # IMU-enabled firmware v2
+MAGIC_IMU_V3 = 0x1855    # IMU-enabled firmware v3
+MAGIC_IMU_V4 = 0x1955    # IMU-enabled firmware v4
+MAGIC_IMU_V5 = 0x0855    # IMU-enabled firmware v5
+MAGIC_IMU_V6 = 0x0955    # IMU-enabled firmware v6
+VALID_MAGICS = {MAGIC_STANDARD, MAGIC_IMU, MAGIC_IMU_V2, MAGIC_IMU_V3, MAGIC_IMU_V4, MAGIC_IMU_V5, MAGIC_IMU_V6}
+IMU_MAGICS = {MAGIC_IMU, MAGIC_IMU_V2, MAGIC_IMU_V3, MAGIC_IMU_V4, MAGIC_IMU_V5, MAGIC_IMU_V6}
 HEADER_SIZE = 80  # bytes per packet header
 SAMPLING_RATE = 30_000.0  # Hz (Neuropixels AP band)
 DTYPE = np.dtype("<i2")  # int16, little-endian
@@ -99,7 +105,7 @@ def parse_header(header_bytes: bytes) -> dict:
 
     return {
         "magic": magic,
-        "has_imu": magic == MAGIC_IMU,
+        "has_imu": magic in IMU_MAGICS,
         "bank": bank,
         "channel_bitmask": bitmask,
         "n_channels": n_channels,

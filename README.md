@@ -1,21 +1,24 @@
 # Chronic Pixel Pipeline
 
-Python toolbox for processing chronic Neuropixels recordings from the SpikeGadgets wireless data logger. Built on [SpikeInterface](https://github.com/SpikeInterface/spikeinterface).
+A Python toolbox for processing chronic Neuropixels long probe recordings from SpikeGadgets wireless data loggers. Built on [SpikeInterface](https://spikeinterface.readthedocs.io/).
 
 ## Features
 
-- **SpikeGadgets .dat reader** — auto-detects packet format (80-byte header + N channels x int16), bank number, and channel count
-- **IMU extraction** — accelerometer, gyroscope, and magnetometer at 2500 Hz from IMU-enabled firmware recordings
-- **Probe geometry** — NP1032 (linear) and NP1030 (staggered) NHP long probe layouts with 4,416 electrodes across 12 banks
-- **Two analysis modes**:
-  - **Per-segment**: each .dat file as a separate SpikeInterface recording
-  - **Concatenated**: all banks combined channel-wise into a single recording (trimmed to shortest)
-- **Post-sorting analysis** — SortingAnalyzer with quality metrics, waveforms, correlograms, template similarity, and 10+ summary visualizations
+- **Read SpikeGadgets `.dat` files** — custom packetized binary format with 80-byte headers
+- **Automatic format detection** — bank number, channel count, firmware version, IMU presence
+- **Neuropixels NHP probe geometry** — NP1032 (linear) and NP1030 (staggered), 4,416 electrodes across 12 banks
+- **Correct µV scaling** — 10-bit ADC conversion with configurable AP gain
+- **IMU extraction** — accelerometer, gyroscope, magnetometer at 2500 Hz
+- **Preprocessing** — bad channel removal, bandpass filtering, IBL destriping
+- **Bio-signal timescan** — scan full recordings for biological signal quality without spike sorting
+- **Spike sorting pipeline** — Kilosort 4 integration with full diagnostic figures
+- **12 diagnostic figure types** — waveforms, autocorrelograms, ISI histograms, spatial footprints, and more
+- **CLI tools** — `cpp-scan` and `cpp-sort` for command-line operation
 
 ## Installation
 
 ```bash
-pip install -e .                  # core (reader + probe geometry)
+pip install -e .                  # core (reader + preprocessing)
 pip install -e ".[analysis]"      # + matplotlib for plotting
 pip install -e ".[sorting]"       # + kilosort4 + pytorch
 pip install -e ".[all]"           # everything
@@ -23,14 +26,44 @@ pip install -e ".[all]"           # everything
 
 ## Quick Start
 
-### Load a recording
+### Python API
 
 ```python
 import chronic_pixel_pipeline as cpp
 
-# Single segment (one .dat file = one probe bank)
-rec = cpp.load_segment("Data/test_segment1.dat")
+# Load a recording
+rec = cpp.load_segment("recording.dat")
+print(f"{rec.get_num_channels()} channels, {rec.get_total_duration():.1f}s")
 
+# Remove bad channels
+rec_clean, good_ids, info = cpp.remove_bad_channels(rec)
+
+# Preprocess (bandpass 300-6000 Hz + IBL destripe)
+rec_pp = cpp.preprocess(rec_clean)
+
+# Extract a time window
+fs = rec.get_sampling_frequency()
+rec_window = rec.frame_slice(start_frame=int(5*fs), end_frame=int(19*fs))
+```
+
+### CLI Tools
+
+**Timecourse bio-signal scan** — find the best segments in a recording:
+```bash
+cpp-scan recording.dat
+cpp-scan recording.dat --output figures/my_scan --window 3 --stride 1.5
+```
+
+**Full spike sorting pipeline** — preprocess, sort with KS4, generate diagnostics:
+```bash
+cpp-sort recording.dat
+cpp-sort recording.dat --t-start 5 --t-end 19
+cpp-sort recording.dat --device cuda --output my_results
+```
+
+### Load All Banks
+
+```python
 # All segments as a dict keyed by bank number
 segments = cpp.load_all_segments("Data/")
 
@@ -38,13 +71,10 @@ segments = cpp.load_all_segments("Data/")
 full_rec = cpp.load_concatenated("Data/")
 ```
 
-### Extract IMU data
+### Extract IMU Data
 
 ```python
-import chronic_pixel_pipeline as cpp
-
-# Load accelerometer, gyroscope, and magnetometer from IMU-enabled firmware
-imu = cpp.load_imu("Data/testgyro_segment1.dat")
+imu = cpp.load_imu("recording.dat")  # IMU-enabled firmware only
 
 imu["accel"]          # (N, 3) int16 — accelerometer X, Y, Z
 imu["gyro"]           # (N, 3) int16 — gyroscope X, Y, Z
@@ -52,100 +82,147 @@ imu["mag"]            # (N, 3) int16 — magnetometer X, Y, Z
 imu["sampling_rate"]  # 2500.0 Hz
 ```
 
-### Run spike sorting
+### Post-Sorting Analysis
 
 ```python
-import spikeinterface.full as si
+from chronic_pixel_pipeline.analysis import build_sorting_analyzer, classify_units
+from chronic_pixel_pipeline.diagnostics import plot_sorting_diagnostics
 
-rec = cpp.load_segment("Data/test_segment1.dat")
-
-sorting = si.run_sorter(
-    'kilosort4', rec,
-    folder='output',
-    torch_device='mps',   # Apple Silicon GPU ('cuda' for NVIDIA)
-    batch_size=30000,
-    nblocks=0,
-)
-```
-
-### Post-sorting analysis
-
-```python
-from chronic_pixel_pipeline.analysis import (
-    build_sorting_analyzer,
-    classify_units,
-    plot_summary,
-)
-
-# Build analyzer with all extensions (waveforms, quality metrics, etc.)
+# Build analyzer with all extensions
 analyzer = build_sorting_analyzer(sorting, rec)
 
 # Classify units by quality
 good_ids, snr_thresh = classify_units(analyzer)
 
-# Generate 10+ summary figures
-plot_summary(analyzer, sorting, rec, "figures/",
-             good_ids=good_ids, snr_thresh=snr_thresh)
+# Generate 12 diagnostic figures
+plot_sorting_diagnostics(analyzer, sorting, rec, "figures/diagnostics/")
+```
+
+### Bio-Signal Timescan
+
+```python
+from chronic_pixel_pipeline.diagnostics import (
+    run_timescan, plot_timecourse_dashboard, plot_best_windows
+)
+
+# Scan for biological signal quality (no spike sorting needed)
+result = run_timescan(rec, window_s=2.0, stride_s=1.0)
+
+# Visualize
+plot_timecourse_dashboard(result, "my recording", "figures/timescan.png")
+plot_best_windows(result, rec.channel_ids, "my recording", "figures/best.png")
 ```
 
 ## Data Format
 
-SpikeGadgets wireless data logger files (`.dat`) use a packet-based binary format:
+SpikeGadgets wireless data logger files (`.dat`) use a packetized binary format:
 
 | Field | Offset | Size | Description |
 |-------|--------|------|-------------|
-| Magic | 0 | 2 bytes | `0x1155` (standard) or `0x1655` (IMU-enabled) |
+| Magic | 0 | 2 bytes | Format identifier (0x1155 standard, 0x1655+ IMU) |
 | Bank | 3 | 1 byte | Probe bank number (0-11) |
-| Channel bitmask | 5 | 1 byte | popcount x 48 = n_channels |
+| Channel bitmask | 5 | 1 byte | Active channel banks (popcount x 48 = n_channels) |
 | Cycle bank | 10 | 1 byte | Bank rotation bitmask |
-| Cycle mux ID | 11 | 1 byte | Multiplexed device ID (0=neural, 1=RFsync, 2=mag, 4=gyro, 8=accel) |
-| Metadata | 12 | 64 bytes | 32 x int16 (IMU X/Y/Z in positions 0-2 on sensor packets) |
+| Cycle mux ID | 11 | 1 byte | Multiplexed device ID |
+| Metadata | 12 | 64 bytes | 32 x int16 (IMU X/Y/Z on sensor packets) |
 | Counter | 76 | 4 bytes | Packet counter |
 | Neural data | 80 | N x 2 bytes | int16 LE, one sample per channel |
 
-- Banks 0-10: 384 channels (848 bytes/packet)
-- Bank 11: 192 channels (464 bytes/packet)
-- 30 kHz sampling rate
+- Sampling rate: 30 kHz
+- Banks 0-10: 384 channels (848-byte packets)
+- Bank 11: 192 channels (464-byte packets)
 
-### IMU Multiplexing (firmware 0x1655)
+### µV Scaling
 
-IMU-enabled recordings interleave sensor data in a 12-packet cycle:
+The Neuropixels 1.0 ASIC has a 10-bit SAR ADC with 1.2V full-scale range.
+SpikeGadgets stores the 10-bit codes left-shifted by 6 in int16:
 
-| Packet | Byte 11 | Content |
-|--------|---------|---------|
-| 0-7 | 0x00 | Bank rotation (neural data in all packets) |
+```
+µV = raw_int16 x 1,200,000 / (65,536 x AP_gain)
+```
+
+At the default gain of 1000: **0.018311 µV/bit**.
+
+### IMU Multiplexing
+
+IMU-enabled recordings (magic 0x1655+) interleave sensor data in a 12-packet cycle:
+
+| Packet | Mux ID | Content |
+|--------|--------|---------|
+| 0-7 | 0x00 | Bank rotation (neural data in all) |
 | 8 | 0x01 | RFsync |
-| 9 | 0x02 | Magnetometer X/Y/Z in metadata[0:3] |
-| 10 | 0x04 | Gyroscope X/Y/Z in metadata[0:3] |
-| 11 | 0x08 | Accelerometer X/Y/Z in metadata[0:3] |
+| 9 | 0x02 | Magnetometer X/Y/Z |
+| 10 | 0x04 | Gyroscope X/Y/Z |
+| 11 | 0x08 | Accelerometer X/Y/Z |
 
-Effective IMU sampling rate: 30,000 / 12 = **2,500 Hz** per sensor.
+Effective IMU sampling rate: 30,000 / 12 = **2,500 Hz**.
+
+## Package Structure
+
+```
+src/chronic_pixel_pipeline/
+    __init__.py          # Public API exports
+    packet.py            # Packet format constants and parsing
+    recording.py         # SpikeInterface recording extractor
+    io.py                # High-level loading API
+    probe_geometry.py    # NP1032/NP1030 probe geometry
+    preprocessing.py     # Bad channel removal, bandpass, destripe
+    analysis.py          # Post-sorting analysis (SortingAnalyzer, quality metrics)
+    diagnostics.py       # Diagnostic visualization (sorting + timescan)
+    scripts/
+        timescan.py      # CLI: cpp-scan
+        sort.py          # CLI: cpp-sort
+
+examples/
+    quickstart.py        # Load, inspect, and preprocess a recording
+    analyze_sorting.py   # Post-sorting analysis with diagnostics
+    plot_imu.py          # IMU extraction and plotting
+```
+
+## API Reference
+
+### Loading
+
+| Function | Description |
+|----------|-------------|
+| `cpp.load_segment(path)` | Load a single `.dat` file as a SpikeInterface recording |
+| `cpp.load_all_segments(dir)` | Load all `.dat` files, keyed by bank number |
+| `cpp.load_concatenated(dir)` | Load and aggregate all banks into one recording |
+| `cpp.load_imu(path)` | Extract IMU data (accel/gyro/mag) from IMU-enabled files |
+
+### Preprocessing
+
+| Function | Description |
+|----------|-------------|
+| `cpp.remove_bad_channels(rec)` | Remove dead/noisy channels by raw RMS |
+| `cpp.preprocess(rec)` | Bandpass filter + IBL destripe |
+
+### Analysis (`chronic_pixel_pipeline.analysis`)
+
+| Function | Description |
+|----------|-------------|
+| `build_sorting_analyzer(sorting, rec)` | Create SortingAnalyzer with all standard extensions |
+| `classify_units(analyzer)` | Classify units as good/bad by quality metrics |
+| `plot_summary(analyzer, sorting, rec, dir)` | Generate summary figures |
+
+### Diagnostics (`chronic_pixel_pipeline.diagnostics`)
+
+| Function | Description |
+|----------|-------------|
+| `plot_sorting_diagnostics(analyzer, ...)` | 12 diagnostic figure types |
+| `run_timescan(rec)` | Scan recording for bio-signal quality |
+| `compute_window_metrics(raw, ...)` | Bio-quality metrics for a single window |
+| `plot_timecourse_dashboard(result, ...)` | Timecourse visualization |
+| `plot_best_windows(result, ...)` | Deep-dive on best time windows |
 
 ## Probe Geometry
 
 Neuropixels NHP long probe (NP1032/NP1030):
 - 4,416 electrodes total
 - 12 banks (11 x 384 + 1 x 192 channels)
-- 2 columns, 20 um vertical pitch
-- NP1032: 103 um horizontal pitch (linear)
-- NP1030: 87 um horizontal pitch (staggered)
-
-## Package Structure
-
-```
-src/chronic_pixel_pipeline/
-    __init__.py          # Public API
-    packet.py            # Packet format constants, parsing, and IMU extraction
-    recording.py         # SpikeInterface recording extractor
-    probe_geometry.py    # NP1032/NP1030 probe layouts
-    io.py                # High-level load functions (load_segment, load_imu, etc.)
-    analysis.py          # Post-sorting analysis and visualization
-
-examples/
-    analyze_sorting.py   # Post-sorting analysis example
-    test_ks4_mps.py      # Kilosort 4 on Apple MPS GPU
-    plot_imu.py          # IMU extraction and plotting
-```
+- 2 columns, 20 µm vertical pitch
+- NP1032: 103 µm horizontal pitch (linear)
+- NP1030: 87 µm horizontal pitch (staggered)
 
 ## License
 

@@ -6,13 +6,18 @@ Data/
 # Figures (generated output)
 figures/
 
-# Sorter outputs
+# Sorter / pipeline outputs
+*_output/
 test_output/
 test_output_mps/
+sorting_output/
 **/sorter_output/
 **/kilosort*/
 **/spykingcircus*/
 **/tridesclous*/
+
+# Development run scripts (not part of the package)
+run_*.py
 
 # Python
 __pycache__/

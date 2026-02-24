@@ -6,10 +6,12 @@ build-backend = "setuptools.build_meta"
 name = "chronic-pixel-pipeline"
 version = "0.1.0"
 description = "Toolbox for processing chronic Neuropixels recordings from SpikeGadgets wireless data logger"
+readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
 dependencies = [
     "numpy>=1.20",
+    "scipy>=1.7",
     "spikeinterface>=0.100",
     "probeinterface>=0.2.17",
 ]
@@ -29,6 +31,10 @@ dev = [
     "chronic-pixel-pipeline[all]",
     "pytest>=7.0",
 ]
+
+[project.scripts]
+cpp-scan = "chronic_pixel_pipeline.scripts.timescan:main"
+cpp-sort = "chronic_pixel_pipeline.scripts.sort:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
