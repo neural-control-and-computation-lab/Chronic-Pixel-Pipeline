@@ -11,13 +11,19 @@ REM   1. Run setup_env.bat first to create the conda environment
 REM   2. Set DATA_ROOT to your SpikeGLX data directory:
 REM        set DATA_ROOT=C:\Users\YourName\data\TRODES_test
 REM   3. Copy the 4 survey directories into DATA_ROOT
+REM
+REM All outputs (sorting_output, figures, logs) are written inside DATA_ROOT
+REM so nothing goes through Dropbox or other cloud sync.
 setlocal
 
 if not defined DATA_ROOT set DATA_ROOT=%USERPROFILE%\data\TRODES_test
 
+set LOG_DIR=%DATA_ROOT%\logs
+
 echo ==================================================
 echo  Chronic Pixel Pipeline - Full Run
 echo  DATA_ROOT: %DATA_ROOT%
+echo  Logs:      %LOG_DIR%
 echo ==================================================
 
 REM Check data exists
@@ -32,7 +38,7 @@ for %%d in (
     )
 )
 
-if not exist logs mkdir logs
+if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 
 set MODE=%1
 if "%MODE%"=="" set MODE=all
@@ -46,7 +52,7 @@ echo.
 echo ==================================================
 echo  Step 1: Spike sorting all 4 surveys with KS4
 echo ==================================================
-powershell -Command "python sort_survey.py all 2>&1 | Tee-Object -FilePath logs\sort_all.log"
+powershell -Command "python sort_survey.py all 2>&1 | Tee-Object -FilePath '%LOG_DIR%\sort_all.log'"
 if "%MODE%"=="sort" goto done
 
 :skip_sort
@@ -59,16 +65,17 @@ echo.
 echo ==================================================
 echo  Step 2: Cross-day neuron tracking with UnitMatch
 echo ==================================================
-powershell -Command "python track_neurons.py 20260226 20260302 20260304 20260306 2>&1 | Tee-Object -FilePath logs\track_neurons.log"
+powershell -Command "python track_neurons.py 20260226 20260302 20260304 20260306 2>&1 | Tee-Object -FilePath '%LOG_DIR%\track_neurons.log'"
 
 :done
 echo.
 echo ==================================================
 echo  Pipeline complete!
 echo ==================================================
-echo Outputs:
-echo   Sorting:  sorting_output\survey_*\  (per-bank KS4 + analyzer caches)
-echo   Tracking: sorting_output\tracking\  (tracking_summary.csv)
-echo   Figures:  figures\sorting\           (PNG visualizations)
+echo Outputs (all inside DATA_ROOT):
+echo   Sorting:  %DATA_ROOT%\sorting_output\survey_*\
+echo   Tracking: %DATA_ROOT%\sorting_output\tracking\
+echo   Figures:  %DATA_ROOT%\figures\sorting\
+echo   Logs:     %LOG_DIR%\
 
 endlocal

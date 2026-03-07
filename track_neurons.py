@@ -51,28 +51,26 @@ def _default_data_root():
         return Path.home() / 'data' / 'TRODES_test'
 
 
-# ---- Paths ----
+# ---- Paths (all outputs live alongside data in DATA_ROOT) ----
 DATA_ROOT = _default_data_root()
-OUTPUT_DIR = Path('sorting_output/tracking')
-FIG_DIR = Path('figures/sorting/tracking')
+OUTPUT_DIR = DATA_ROOT / 'sorting_output' / 'tracking'
+FIG_DIR = DATA_ROOT / 'figures' / 'sorting' / 'tracking'
 
+# Survey raw-data dir names (relative to DATA_ROOT)
+SURVEY_DIRS = {
+    '20260226': 'SvyPrb_2026-02-26T11.58.07_g0',
+    '20260302': 'SvyPrb_2026-03-02T14.10.26_g0',
+    '20260304': 'SvyPrb_2026-03-04T10.17.50_g0',
+    '20260306': 'SvyPrb_2026-03-06T10.01.15_g0',
+}
+
+# Derived helper — sort output for a given survey date
 SURVEYS = {
-    '20260226': {
-        'spikeglx_dir': DATA_ROOT / 'SvyPrb_2026-02-26T11.58.07_g0',
-        'sort_dir': Path('sorting_output/survey_20260226'),
-    },
-    '20260302': {
-        'spikeglx_dir': DATA_ROOT / 'SvyPrb_2026-03-02T14.10.26_g0',
-        'sort_dir': Path('sorting_output/survey_20260302'),
-    },
-    '20260304': {
-        'spikeglx_dir': DATA_ROOT / 'SvyPrb_2026-03-04T10.17.50_g0',
-        'sort_dir': Path('sorting_output/survey_20260304'),
-    },
-    '20260306': {
-        'spikeglx_dir': DATA_ROOT / 'SvyPrb_2026-03-06T10.01.15_g0',
-        'sort_dir': Path('sorting_output/survey_20260306'),
-    },
+    key: {
+        'spikeglx_dir': DATA_ROOT / sdir,
+        'sort_dir': DATA_ROOT / 'sorting_output' / f'survey_{key}',
+    }
+    for key, sdir in SURVEY_DIRS.items()
 }
 
 

@@ -22,12 +22,18 @@ def build_sorting_analyzer(sorting, recording, sparse=True,
                            correlogram_window_ms=50.0,
                            correlogram_bin_ms=1.0,
                            metric_names=None,
-                           cache_dir=None):
+                           cache_dir=None,
+                           fast=False):
     """Create a SortingAnalyzer and compute standard extensions.
 
     Computes: random_spikes, waveforms, templates, noise_levels,
     spike_amplitudes, correlograms, template_similarity, unit_locations,
     spike_locations, and quality_metrics.
+
+    If fast=True, skips expensive extensions that re-read raw data
+    (spike_amplitudes, spike_locations) and only computes metrics that
+    don't depend on them. Use this for survey sorting where only
+    templates and basic quality metrics (SNR, firing_rate) are needed.
 
     Parameters
     ----------
@@ -54,6 +60,11 @@ def build_sorting_analyzer(sorting, recording, sparse=True,
         cached analyzer already exists there, it is loaded directly
         (skipping all computation). If None, the analyzer is created
         in memory with no caching.
+    fast : bool
+        If True, skip expensive extensions (spike_amplitudes,
+        spike_locations) that re-read raw data. Computes only
+        templates, noise_levels, correlograms, template_similarity,
+        unit_locations, quality_metrics, and template_metrics.
 
     Returns
     -------
@@ -65,6 +76,11 @@ def build_sorting_analyzer(sorting, recording, sparse=True,
 
     if metric_names is None:
         metric_names = list(DEFAULT_METRIC_NAMES)
+
+    # In fast mode, drop metrics that depend on spike_amplitudes
+    if fast:
+        _skip = {'amplitude_cutoff', 'amplitude_median', 'drift'}
+        metric_names = [m for m in metric_names if m not in _skip]
 
     # Try loading from cache
     if cache_dir is not None:
@@ -89,13 +105,15 @@ def build_sorting_analyzer(sorting, recording, sparse=True,
     analyzer.compute("waveforms", ms_before=ms_before, ms_after=ms_after)
     analyzer.compute("templates")
     analyzer.compute("noise_levels")
-    analyzer.compute("spike_amplitudes")
+    if not fast:
+        analyzer.compute("spike_amplitudes")
     analyzer.compute("correlograms",
                      window_ms=correlogram_window_ms,
                      bin_ms=correlogram_bin_ms)
     analyzer.compute("template_similarity")
     analyzer.compute("unit_locations", method="center_of_mass")
-    analyzer.compute("spike_locations", method="center_of_mass")
+    if not fast:
+        analyzer.compute("spike_locations", method="center_of_mass")
     analyzer.compute("quality_metrics", metric_names=metric_names)
     analyzer.compute("template_metrics", include_multi_channel_metrics=True)
 

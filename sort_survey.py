@@ -74,25 +74,28 @@ def _detect_torch_device():
 
 DATA_ROOT = _default_data_root()
 
-# All known survey directories
+# All known survey directories (paths are relative to DATA_ROOT)
 SURVEYS = {
-    '20260226': {
-        'dir': 'SvyPrb_2026-02-26T11.58.07_g0',
-        'output': 'sorting_output/survey_20260226',
-    },
-    '20260302': {
-        'dir': 'SvyPrb_2026-03-02T14.10.26_g0',
-        'output': 'sorting_output/survey_20260302',
-    },
-    '20260304': {
-        'dir': 'SvyPrb_2026-03-04T10.17.50_g0',
-        'output': 'sorting_output/survey_20260304',
-    },
-    '20260306': {
-        'dir': 'SvyPrb_2026-03-06T10.01.15_g0',
-        'output': 'sorting_output/survey_20260306',
-    },
+    '20260226': 'SvyPrb_2026-02-26T11.58.07_g0',
+    '20260302': 'SvyPrb_2026-03-02T14.10.26_g0',
+    '20260304': 'SvyPrb_2026-03-04T10.17.50_g0',
+    '20260306': 'SvyPrb_2026-03-06T10.01.15_g0',
 }
+
+
+def _survey_dir(key):
+    """Return the raw SpikeGLX data directory for a survey."""
+    return DATA_ROOT / SURVEYS[key]
+
+
+def _output_dir(key):
+    """Return the sorting output directory for a survey (inside DATA_ROOT)."""
+    return DATA_ROOT / 'sorting_output' / f'survey_{key}'
+
+
+def _fig_dir(key):
+    """Return the figure directory for a survey (inside DATA_ROOT)."""
+    return DATA_ROOT / 'figures' / 'sorting' / f'survey_{key}'
 
 
 def parse_meta(meta_path):
@@ -672,11 +675,13 @@ def plot_full_probe(all_bank_results, fig_dir):
     logger.info("  Saved: %s", out_path)
 
 
-def sort_one_survey(key, survey_dir, output_dir, torch_device=None):
+def sort_one_survey(key, survey_dir, output_dir, fig_dir=None, torch_device=None):
     """Sort a single survey: all banks, merge, visualize."""
-    fig_dir = Path('figures/sorting') / output_dir.name
+    if fig_dir is None:
+        fig_dir = DATA_ROOT / 'figures' / 'sorting' / output_dir.name
     logger.info("Survey: %s", survey_dir)
     logger.info("Output: %s", output_dir)
+    logger.info("Figures: %s", fig_dir)
 
     all_bank_results = sort_and_analyze_banks(
         survey_dir, output_dir, fig_dir, torch_device=torch_device)
@@ -718,6 +723,7 @@ def sort_one_survey(key, survey_dir, output_dir, torch_device=None):
 
 def main():
     torch_device = _detect_torch_device()
+    logger.info("DATA_ROOT: %s", DATA_ROOT)
 
     # Parse command-line args
     if len(sys.argv) >= 3 and sys.argv[1] != 'all':
@@ -734,8 +740,9 @@ def main():
             # Sort ALL known surveys sequentially
             logger.info("Sorting ALL %d surveys...", len(SURVEYS))
             for key in sorted(SURVEYS.keys()):
-                survey_dir = DATA_ROOT / SURVEYS[key]['dir']
-                output_dir = Path(SURVEYS[key]['output'])
+                survey_dir = _survey_dir(key)
+                output_dir = _output_dir(key)
+                fig_dir = _fig_dir(key)
                 if not survey_dir.exists():
                     logger.warning("Skipping %s — data not found: %s",
                                    key, survey_dir)
@@ -744,27 +751,23 @@ def main():
                 logger.info("# SURVEY %s", key)
                 logger.info("#" * 70)
                 sort_one_survey(key, survey_dir, output_dir,
-                                torch_device=torch_device)
+                                fig_dir=fig_dir, torch_device=torch_device)
         elif arg in SURVEYS:
             # Sort by date key
-            survey_dir = DATA_ROOT / SURVEYS[arg]['dir']
-            output_dir = Path(SURVEYS[arg]['output'])
-            sort_one_survey(arg, survey_dir, output_dir,
-                            torch_device=torch_device)
+            sort_one_survey(arg, _survey_dir(arg), _output_dir(arg),
+                            fig_dir=_fig_dir(arg), torch_device=torch_device)
         else:
             # Assume it's a path
             survey_dir = Path(arg)
             date_str = survey_dir.name.split('_')[1].split('T')[0].replace('-', '')
-            output_dir = Path(f'sorting_output/survey_{date_str}')
+            output_dir = DATA_ROOT / 'sorting_output' / f'survey_{date_str}'
             sort_one_survey(date_str, survey_dir, output_dir,
                             torch_device=torch_device)
     else:
         # Default: latest survey
         key = '20260306'
-        survey_dir = DATA_ROOT / SURVEYS[key]['dir']
-        output_dir = Path(SURVEYS[key]['output'])
-        sort_one_survey(key, survey_dir, output_dir,
-                        torch_device=torch_device)
+        sort_one_survey(key, _survey_dir(key), _output_dir(key),
+                        fig_dir=_fig_dir(key), torch_device=torch_device)
 
 
 if __name__ == '__main__':
