@@ -1,18 +1,23 @@
 """Full spike sorting pipeline for SpikeGadgets Neuropixels recordings.
 
-Loads a .dat file, removes bad channels, applies preprocessing (bandpass +
-IBL destripe), runs Kilosort 4, and generates diagnostic figures.
+Loads a .dat file, removes bad channels, applies preprocessing (notch +
+bandpass + CMR/destripe), runs Kilosort 4, and generates diagnostic figures.
 
 Usage::
 
     cpp-sort recording.dat
     cpp-sort recording.dat --t-start 5 --t-end 19
     cpp-sort recording.dat --device cuda --output my_results
+    cpp-sort recording.dat --ap-gain 250 --notch-freqs 1602 3204 4806 --cmr
 """
 
 import argparse
 import logging
+import os
 import sys
+
+# Prevent segfault from duplicate OpenMP runtimes (PyTorch + FAISS on macOS)
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 
 def main(argv=None):
@@ -25,6 +30,7 @@ def main(argv=None):
             "  cpp-sort recording.dat\n"
             "  cpp-sort recording.dat --t-start 5 --t-end 19\n"
             "  cpp-sort recording.dat --device cuda\n"
+            "  cpp-sort recording.dat --ap-gain 250 --notch-freqs 1602 3204 4806 --cmr\n"
             "  cpp-sort recording.dat --no-sort  # preprocessing + diagnostics only\n"
         ),
     )
@@ -56,6 +62,24 @@ def main(argv=None):
     parser.add_argument(
         "--no-destripe", action="store_true",
         help="Skip IBL destriping (highpass spatial filter)",
+    )
+    parser.add_argument(
+        "--cmr", action="store_true",
+        help="Use common median reference instead of IBL destriping",
+    )
+    parser.add_argument(
+        "--notch-freqs", type=float, nargs="+", default=None,
+        help="Notch filter frequencies in Hz (e.g., 1602 3204 4806 for "
+             "SpikeGadgets artifact removal)",
+    )
+    parser.add_argument(
+        "--notch-q", type=float, default=30,
+        help="Notch filter quality factor (default: 30)",
+    )
+    parser.add_argument(
+        "--ap-gain", type=int, default=1000,
+        help="AP band gain setting (default: 1000). Use 250 if gain "
+             "mismatch is suspected.",
     )
     parser.add_argument(
         "--probe", default="NP1032",
@@ -108,18 +132,19 @@ def main(argv=None):
     name = dat_file.stem
     t_label = ""
 
-    # ── 1. Load ───────────────────────────────────────────────────────────
-    logger.info("Loading %s ...", dat_file.name)
-    rec_full = cpp.load_segment(dat_file, probe_part_number=args.probe)
+    # -- 1. Load ---------------------------------------------------------------
+    logger.info("Loading %s (ap_gain=%d)...", dat_file.name, args.ap_gain)
+    rec_full = cpp.load_segment(dat_file, probe_part_number=args.probe,
+                                ap_gain=args.ap_gain)
     fs = rec_full.get_sampling_frequency()
     n_total = rec_full.get_num_samples()
     total_dur = n_total / fs
 
-    logger.info("  %d channels, %.1fs (%d samples), µV/bit=%.6f",
+    logger.info("  %d channels, %.1fs (%d samples), uV/bit=%.6f",
                 rec_full.get_num_channels(), total_dur, n_total,
                 rec_full.get_channel_gains()[0])
 
-    # ── 2. Extract time window ────────────────────────────────────────────
+    # -- 2. Extract time window ------------------------------------------------
     rec = rec_full
     if args.t_start is not None or args.t_end is not None:
         t_start = args.t_start if args.t_start is not None else 0.0
@@ -127,25 +152,36 @@ def main(argv=None):
         sf = int(t_start * fs)
         ef = min(int(t_end * fs), n_total)
         rec = rec_full.frame_slice(start_frame=sf, end_frame=ef)
-        t_label = f" (s{t_start:.0f}–{t_end:.0f})"
-        logger.info("  Extracted seconds %.1f–%.1f: %d samples, %.1fs",
+        t_label = f" (s{t_start:.0f}-{t_end:.0f})"
+        logger.info("  Extracted seconds %.1f-%.1f: %d samples, %.1fs",
                      t_start, t_end, rec.get_num_samples(),
                      rec.get_total_duration())
 
-    # ── 3. Remove bad channels ────────────────────────────────────────────
+    # -- 3. Remove bad channels ------------------------------------------------
     logger.info("Removing bad channels...")
     rec_clean, good_ch_ids, bad_info = remove_bad_channels(rec)
     logger.info("  Removed %d (dead=%d, noisy=%d), keeping %d channels",
                 bad_info["n_removed"], bad_info["n_dead"],
                 bad_info["n_noisy"], bad_info["n_kept"])
 
-    # ── 4. Preprocess ─────────────────────────────────────────────────────
-    logger.info("Preprocessing: bandpass %d–%d Hz%s...",
-                args.freq_min, args.freq_max,
-                " + destripe" if not args.no_destripe else "")
+    # -- 4. Preprocess ---------------------------------------------------------
+    use_cmr = args.cmr
+    use_destripe = not args.no_destripe and not use_cmr
+    pp_parts = [f"bandpass {args.freq_min}-{args.freq_max} Hz"]
+    if args.notch_freqs:
+        pp_parts.insert(0, f"notch {args.notch_freqs}")
+    if use_cmr:
+        pp_parts.append("CMR")
+    elif use_destripe:
+        pp_parts.append("destripe")
+    logger.info("Preprocessing: %s...", " + ".join(pp_parts))
+
     rec_pp = preprocess(rec_clean, freq_min=args.freq_min,
                         freq_max=args.freq_max,
-                        destripe=not args.no_destripe)
+                        destripe=use_destripe,
+                        notch_freqs=args.notch_freqs,
+                        notch_q=args.notch_q,
+                        cmr=use_cmr)
     logger.info("  Done: %d ch, %.1fs",
                 rec_pp.get_num_channels(), rec_pp.get_total_duration())
 
@@ -154,7 +190,7 @@ def main(argv=None):
         logger.info("Pipeline complete (preprocessing only).")
         return
 
-    # ── 5. Run Kilosort 4 ─────────────────────────────────────────────────
+    # -- 5. Run Kilosort 4 -----------------------------------------------------
     logger.info("Running Kilosort 4 (device=%s)...", args.device)
     import spikeinterface.full as si
 
@@ -175,7 +211,7 @@ def main(argv=None):
     logger.info("  Sorting complete: %d units, %d total spikes",
                 n_units, total_spikes)
 
-    # ── 6. Diagnostics ────────────────────────────────────────────────────
+    # -- 6. Diagnostics --------------------------------------------------------
     logger.info("Building SortingAnalyzer...")
     analyzer = build_sorting_analyzer(sorting, rec_pp)
 
@@ -188,9 +224,9 @@ def main(argv=None):
     logger.info("    Median SNR: %.2f", qm["snr"].median())
     logger.info("    Median FR:  %.2f Hz", qm["firing_rate"].median())
     logger.info("    Median ISI viol: %.3f", qm["isi_violations_ratio"].median())
-    logger.info("    Median noise (µV): %.4f", np.median(noise))
-    logger.info("    Median template PTP (µV): %.2f", np.median(ptps))
-    logger.info("    Max template PTP (µV): %.2f", np.max(ptps))
+    logger.info("    Median noise (uV): %.4f", np.median(noise))
+    logger.info("    Median template PTP (uV): %.2f", np.median(ptps))
+    logger.info("    Max template PTP (uV): %.2f", np.max(ptps))
 
     logger.info("Generating diagnostic figures...")
     recording_name = f"{name}{t_label}"

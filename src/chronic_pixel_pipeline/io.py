@@ -6,7 +6,8 @@ from .packet import detect_format, extract_imu
 from .recording import SpikeGadgetsNPXRecording
 
 
-def load_segment(file_path, probe_part_number="NP1032", attach_probe=True):
+def load_segment(file_path, probe_part_number="NP1032", attach_probe=True,
+                  ap_gain=1000):
     """Load a single .dat segment file as a SpikeInterface recording.
 
     Parameters
@@ -18,6 +19,9 @@ def load_segment(file_path, probe_part_number="NP1032", attach_probe=True):
         Use "NP1030" for the staggered variant.
     attach_probe : bool
         If True and probeinterface is installed, attach probe geometry.
+    ap_gain : int
+        Neuropixels AP band gain setting. Default 1000.
+        Common values: 50, 125, 250, 500, 1000, 1500, 2000, 3000.
 
     Returns
     -------
@@ -25,7 +29,8 @@ def load_segment(file_path, probe_part_number="NP1032", attach_probe=True):
         Recording with channel IDs reflecting electrode positions on the probe.
     """
     return SpikeGadgetsNPXRecording(
-        file_path, probe_part_number=probe_part_number, attach_probe=attach_probe
+        file_path, probe_part_number=probe_part_number, attach_probe=attach_probe,
+        ap_gain=ap_gain,
     )
 
 

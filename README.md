@@ -157,6 +157,95 @@ IMU-enabled recordings (magic 0x1655+) interleave sensor data in a 12-packet cyc
 
 Effective IMU sampling rate: 30,000 / 12 = **2,500 Hz**.
 
+## Survey Sorting Pipeline
+
+Sort SpikeGLX survey-mode recordings across all 12 banks of the NP1032 probe, with Kilosort 4 drift correction.
+
+### Setup (Windows with CUDA)
+
+```bat
+setup_env.bat
+conda activate cpp
+```
+
+### Setup (Linux / macOS)
+
+```bash
+bash setup_env.sh
+conda activate cpp
+```
+
+### Running
+
+```bash
+# Sort a single survey by date key
+python sort_survey.py 20260226
+
+# Sort ALL known surveys
+python sort_survey.py all
+
+# Sort + track neurons across days (full pipeline)
+run_all.bat          # Windows
+bash run_all.sh      # Linux / macOS
+```
+
+Set the `DATA_ROOT` environment variable to point to the directory containing the SpikeGLX survey folders (e.g., `SvyPrb_2026-02-26T11.58.07_g0/`). On Windows this defaults to `%USERPROFILE%\data\TRODES_test`.
+
+### What it does
+
+1. **Parses** the SpikeGLX survey timetable (`svySBTT`) from the `.meta` file
+2. **Extracts** each bank's stable data window (skipping settle periods)
+3. **Assigns** correct NP1032 probe geometry per bank
+4. **Preprocesses** with bandpass + IBL destriping
+5. **Spike-sorts** each bank independently with Kilosort 4 (CUDA auto-detected, drift correction enabled)
+6. **Builds** SortingAnalyzer with quality metrics per bank
+7. **Merges** all bank sortings into one full-probe summary
+8. **Generates** diagnostic figures: full-probe overview, drift correction, spike depth scatter
+
+### Output
+
+```
+sorting_output/survey_YYYYMMDD/
+    bank00_ks4/          # Per-bank KS4 output
+        sorter_output/   # Raw KS4 files (ops.npy with drift data)
+        analyzer_cache/  # SortingAnalyzer cache (templates, quality metrics)
+    bank01_ks4/
+    ...
+    merged/
+        merged_units.csv # All units across banks with depth, amplitude, quality
+
+figures/sorting/survey_YYYYMMDD/
+    survey_full_probe.png  # Unit locations, firing rates, amplitudes by depth
+    drift_correction.png   # Drift amount over time per bank
+    drift_scatter.png      # Spike depth scatter over time per bank
+```
+
+## Cross-Day Neuron Tracking
+
+Track neurons across multiple survey days using [UnitMatch](https://github.com/EnnyvanBeest/UnitMatch) (Naive Bayes waveform matching).
+
+```bash
+# Track across all 4 survey dates
+python track_neurons.py
+
+# Track specific dates
+python track_neurons.py 20260226 20260302
+```
+
+### Output
+
+```
+sorting_output/tracking/
+    tracking_summary.csv   # All matched pairs with probabilities and depths
+    bank00/                # Per-bank UnitMatch results
+        prob_matrix.npy    # Match probability matrix
+        UIDs.npy           # Unique neuron IDs
+
+figures/sorting/tracking/
+    tracking_summary.png   # Matches per bank, confidence distribution, depth consistency
+    tracking_full_probe.png # Full-probe tracking map across days
+```
+
 ## Package Structure
 
 ```
@@ -173,10 +262,10 @@ src/chronic_pixel_pipeline/
         timescan.py      # CLI: cpp-scan
         sort.py          # CLI: cpp-sort
 
-examples/
-    quickstart.py        # Load, inspect, and preprocess a recording
-    analyze_sorting.py   # Post-sorting analysis with diagnostics
-    plot_imu.py          # IMU extraction and plotting
+sort_survey.py           # Survey-mode sorting pipeline (all banks + drift correction)
+track_neurons.py         # Cross-day neuron tracking with UnitMatch
+setup_env.sh / .bat      # Environment setup (conda + CUDA)
+run_all.sh / .bat        # Full pipeline orchestration
 ```
 
 ## API Reference

@@ -16,8 +16,11 @@ sorting_output/
 **/spykingcircus*/
 **/tridesclous*/
 
-# Development run scripts (not part of the package)
-run_*.py
+# Scratch / one-off analysis scripts
+scratch/
+
+# Logs
+logs/
 
 # Python
 __pycache__/

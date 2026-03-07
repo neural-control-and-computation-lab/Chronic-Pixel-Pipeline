@@ -261,13 +261,17 @@ def plot_sorting_diagnostics(analyzer, sorting, recording, output_dir,
     axes_arr = np.atleast_2d(axes_arr)
     if axes_arr.shape[0] == 1 and nrows_amp > 1:
         axes_arr = axes_arr.T
-    spikes = sorting.to_spike_vector()
+    # Use the analyzer's spike vector (which matches amps after trimming)
+    spikes = analyzer.sorting.to_spike_vector()
+    # If analyzer trimmed spikes, amps length may differ; use min length
+    n_spikes_amps = len(amps)
+    spikes_for_amps = spikes[:n_spikes_amps]
     for idx, uid in enumerate(amp_ids):
         r, c = divmod(idx, ncols_amp)
         ax = axes_arr[r, c]
         uid_idx = list(unit_ids).index(uid)
-        spike_mask = spikes["unit_index"] == uid_idx
-        spike_times = spikes["sample_index"][spike_mask] / fs
+        spike_mask = spikes_for_amps["unit_index"] == uid_idx
+        spike_times = spikes_for_amps["sample_index"][spike_mask] / fs
         spike_amps = amps[spike_mask]
         ax.scatter(spike_times, spike_amps, s=3, alpha=0.5,
                    c="steelblue", edgecolors="none")

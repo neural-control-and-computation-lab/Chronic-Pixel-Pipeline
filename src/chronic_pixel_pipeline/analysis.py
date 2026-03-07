@@ -16,11 +16,13 @@ DEFAULT_METRIC_NAMES = [
 
 
 def build_sorting_analyzer(sorting, recording, sparse=True,
+                           radius_um=150.0,
                            max_spikes_per_unit=500,
                            ms_before=1.5, ms_after=2.5,
                            correlogram_window_ms=50.0,
                            correlogram_bin_ms=1.0,
-                           metric_names=None):
+                           metric_names=None,
+                           cache_dir=None):
     """Create a SortingAnalyzer and compute standard extensions.
 
     Computes: random_spikes, waveforms, templates, noise_levels,
@@ -35,6 +37,10 @@ def build_sorting_analyzer(sorting, recording, sparse=True,
         Recording the sorting was run on.
     sparse : bool
         Use sparse waveform extraction (recommended).
+    radius_um : float
+        Radius in micrometers for sparse channel estimation. Default 150
+        ensures both columns of two-column probes (e.g., NP1032 with
+        103 um column spacing) are included in each unit's channel set.
     max_spikes_per_unit : int
         Max random spikes to extract per unit.
     ms_before, ms_after : float
@@ -43,6 +49,11 @@ def build_sorting_analyzer(sorting, recording, sparse=True,
         Correlogram parameters.
     metric_names : list[str] or None
         Quality metrics to compute. Uses DEFAULT_METRIC_NAMES if None.
+    cache_dir : str, Path, or None
+        Directory for caching the analyzer to disk. If provided and a
+        cached analyzer already exists there, it is loaded directly
+        (skipping all computation). If None, the analyzer is created
+        in memory with no caching.
 
     Returns
     -------
@@ -50,13 +61,29 @@ def build_sorting_analyzer(sorting, recording, sparse=True,
         Fully populated analyzer.
     """
     import spikeinterface.full as si
+    from pathlib import Path
 
     if metric_names is None:
         metric_names = list(DEFAULT_METRIC_NAMES)
 
-    analyzer = si.create_sorting_analyzer(
-        sorting, recording, format="memory", sparse=sparse,
-    )
+    # Try loading from cache
+    if cache_dir is not None:
+        cache_dir = Path(cache_dir)
+        if (cache_dir / "spikeinterface_info.json").exists():
+            try:
+                analyzer = si.load_sorting_analyzer(cache_dir)
+                return analyzer
+            except Exception:
+                pass  # cache invalid, recompute
+
+    fmt = "binary_folder" if cache_dir is not None else "memory"
+    kwargs = {"sorting": sorting, "recording": recording,
+              "format": fmt, "sparse": sparse,
+              "radius_um": radius_um}
+    if cache_dir is not None:
+        kwargs["folder"] = cache_dir
+        kwargs["overwrite"] = True
+    analyzer = si.create_sorting_analyzer(**kwargs)
 
     analyzer.compute("random_spikes", max_spikes_per_unit=max_spikes_per_unit)
     analyzer.compute("waveforms", ms_before=ms_before, ms_after=ms_after)
@@ -70,6 +97,7 @@ def build_sorting_analyzer(sorting, recording, sparse=True,
     analyzer.compute("unit_locations", method="center_of_mass")
     analyzer.compute("spike_locations", method="center_of_mass")
     analyzer.compute("quality_metrics", metric_names=metric_names)
+    analyzer.compute("template_metrics", include_multi_channel_metrics=True)
 
     return analyzer
 
@@ -117,6 +145,298 @@ def classify_units(analyzer, snr_thresh=None, fr_thresh=0.1,
         mask = mask & (qm['presence_ratio'].fillna(1.0) > presence_thresh)
 
     return qm.index[mask].tolist(), snr_thresh
+
+
+def classify_units_advanced(analyzer,
+                            # Noise thresholds (Stage A)
+                            max_peaks=2,
+                            max_spread_um=800,
+                            max_isi_violations=0.5,
+                            min_amplitude_uv=25.0,
+                            max_n_spatial_channels=20,
+                            min_n_spatial_channels=4,
+                            max_half_width_ms=0.8,
+                            min_amp_spatial_product=80.0,
+                            # Axonal thresholds (Stage B)
+                            axonal_pt_ratio_thresh=1.0,
+                            axonal_max_spread_um=80.0,
+                            # Cell type threshold (Stage C)
+                            ns_peak_to_valley_s=0.00042,
+                            # Artifact voting thresholds (Stage D)
+                            artifact_voting=True,
+                            artifact_min_violations=2,
+                            artifact_max_spatial_decay_um=525.9,
+                            artifact_min_isi_cv=0.90,
+                            artifact_max_duration_10pct_ms=1.57):
+    """Multi-stage unit classification using template and quality metrics.
+
+    Three-stage pipeline inspired by Bombcell (Fabre et al., 2023) and
+    CellExplorer (Petersen et al., 2021):
+      A) Noise detection — multi-peaked, ISI violations, low amplitude,
+         insufficient spatial footprint, excessive spatial spread,
+         too-few spatial channels, overly broad waveform
+      B) Somatic vs axonal — positive-dominant waveform = axonal
+      C) Cell type — narrow-spiking (NS) vs broad-spiking (BS) for somatic
+
+    Note on peak_trough_ratio: SpikeInterface computes peak_val / trough_val
+    where trough is the most negative point and peak is the subsequent max.
+    For standard neurons this is always negative (e.g., -0.2 means the
+    positive recovery is 20% of the negative deflection). More negative
+    values (e.g., -3.0) mean the positive peak dominates — typical of
+    axonal recordings.
+
+    Parameters
+    ----------
+    analyzer : SortingAnalyzer
+        Must have template_metrics and quality_metrics extensions computed.
+    max_peaks : int
+        Max positive or negative peaks before flagging as noise.
+    max_spread_um : float
+        Spatial spread above which a unit is flagged as noise (um).
+    max_isi_violations : float
+        ISI violations ratio above which a unit is noise.
+    min_amplitude_uv : float
+        Minimum peak-to-peak template amplitude (uV) on peak channel.
+        Units below this are flagged as noise regardless of spatial extent.
+    max_n_spatial_channels : int
+        Maximum number of channels with PTP > 25% of peak amplitude.
+        Real neurons produce a localized dipole that decays rapidly with
+        distance; units detectable on too many channels are typically
+        electromagnetic interference or motion artifacts. Default 20.
+    min_n_spatial_channels : int
+        Minimum number of channels with PTP > 25% of peak amplitude.
+        Real neurons generate dipole fields detectable on multiple
+        nearby channels; units visible on too few channels are likely
+        spike-sorter artifacts or localized electrical noise. Default 4.
+    max_half_width_ms : float
+        Maximum half-width of the template waveform (ms) on peak channel.
+        Broad, symmetric waveforms exceeding this are low-frequency
+        artifacts, not real action potentials. Real broad-spiking neurons
+        have half-widths < 0.45 ms. Default 0.8.
+    min_amp_spatial_product : float
+        Minimum product of amplitude (uV) x n_spatial_channels.
+        Real neurons generate dipole fields that spread to neighboring
+        channels via volume conduction; units with low amplitude AND
+        narrow spatial footprint are likely spike-sorter artifacts
+        (noise fluctuations picked up on a single channel). Default 80
+        requires e.g. 80 uV on 1 channel, 40 uV on 2, or 27 uV on 3.
+    axonal_pt_ratio_thresh : float
+        Absolute peak-trough ratio above which a non-noise unit is axonal
+        (positive peak dominates trough).
+    axonal_max_spread_um : float
+        Max spatial spread for axonal classification (um).
+    ns_peak_to_valley_s : float
+        Peak-to-valley duration threshold: <= this = narrow-spiking (s).
+    artifact_voting : bool
+        Enable Stage D artifact voting. When True, non-noise units that
+        violate >= ``artifact_min_violations`` of 3 novel metric criteria
+        are reclassified as noise.
+    artifact_min_violations : int
+        Minimum number of criteria violations to flag as artifact (default 2).
+    artifact_max_spatial_decay_um : float
+        Spatial decay constant above which a unit is flagged (diffuse signal).
+    artifact_min_isi_cv : float
+        ISI coefficient of variation below which a unit is flagged
+        (too-regular firing, not Poisson-like).
+    artifact_max_duration_10pct_ms : float
+        Waveform duration at 10% amplitude above which a unit is flagged
+        (overly wide waveform).
+
+    Returns
+    -------
+    pandas.DataFrame
+        Indexed by unit_id with columns: unit_class, recording_type,
+        cell_type, amplitude_uv, n_spatial_channels, template_rms,
+        spatial_decay_um, isi_cv, duration_10pct_ms,
+        plus all template metric columns.
+    """
+    import pandas as pd
+
+    tm = analyzer.get_extension("template_metrics").get_data()
+    qm = analyzer.get_extension("quality_metrics").get_data()
+    templates = analyzer.get_extension("templates").get_data()
+
+    # Start with template metrics as the base DataFrame
+    df = tm.copy()
+
+    # Compute per-unit template amplitude, spatial extent, and RMS
+    unit_ids = list(df.index)
+    all_unit_ids = list(analyzer.sorting.unit_ids)
+    ptp_amps = np.full(len(df), np.nan)
+    n_spatial_ch = np.full(len(df), 0, dtype=int)
+    t_rms = np.full(len(df), np.nan)
+    for i, uid in enumerate(unit_ids):
+        uid_idx = all_unit_ids.index(uid)
+        template = templates[uid_idx]          # (n_samples, n_channels)
+        ptp_per_ch = np.ptp(template, axis=0)
+        peak_ch = np.argmax(ptp_per_ch)
+        peak_ptp = ptp_per_ch[peak_ch]
+        ptp_amps[i] = peak_ptp
+        n_spatial_ch[i] = int(np.sum(ptp_per_ch > 0.25 * peak_ptp))
+        t_rms[i] = np.sqrt(np.mean(template[:, peak_ch] ** 2))
+    df['amplitude_uv'] = ptp_amps
+    df['n_spatial_channels'] = n_spatial_ch
+    df['template_rms'] = t_rms
+
+    # Initialize classification columns
+    df['unit_class'] = 'good'
+    df['recording_type'] = pd.NA
+    df['cell_type'] = pd.NA
+
+    # ── Stage A: Noise detection ─────────────────────────────────────────
+    noise_mask = np.zeros(len(df), dtype=bool)
+
+    # Multi-peaked waveforms (>2 peaks = likely artifact or multi-unit)
+    if 'num_negative_peaks' in df.columns:
+        noise_mask |= (df['num_negative_peaks'] > max_peaks)
+    if 'num_positive_peaks' in df.columns:
+        noise_mask |= (df['num_positive_peaks'] > max_peaks)
+
+    # Spatially too wide (volume-conducted noise)
+    if 'spread' in df.columns:
+        noise_mask |= (df['spread'].notna() & (df['spread'] > max_spread_um))
+
+    # No refractory period
+    if 'isi_violations_ratio' in qm.columns:
+        isi_vals = qm['isi_violations_ratio'].reindex(df.index)
+        noise_mask |= (isi_vals > max_isi_violations)
+
+    # Too-low amplitude — below this threshold, the signal is not
+    # distinguishable from noise/crosstalk regardless of other metrics
+    noise_mask |= (df['amplitude_uv'] < min_amplitude_uv)
+
+    # Insufficient amplitude-spatial product — real neurons produce dipole
+    # fields that must be detectable on multiple nearby channels.  Units
+    # with both low amplitude and narrow spatial footprint are likely
+    # spike-sorter artifacts (noise fluctuations on a single channel).
+    amp_spatial = df['amplitude_uv'] * df['n_spatial_channels']
+    noise_mask |= (amp_spatial < min_amp_spatial_product)
+
+    # Too many channels with significant signal — real neurons produce a
+    # localized dipole field that decays with distance.  Units detectable
+    # at >25% of peak amplitude on too many channels are electromagnetic
+    # interference, motion artifacts, or volume-conducted noise.
+    noise_mask |= (df['n_spatial_channels'] > max_n_spatial_channels)
+
+    # Too few channels with significant signal — real neurons generate
+    # dipole fields detectable on multiple nearby channels via volume
+    # conduction.  Units visible on fewer than min_n_spatial_channels
+    # are likely spike-sorter artifacts or localized electrical noise.
+    noise_mask |= (df['n_spatial_channels'] < min_n_spatial_channels)
+
+    # Overly broad waveform — real action potentials have half-widths
+    # well below 0.8 ms (even broad-spiking neurons peak around 0.45 ms).
+    # Wider waveforms are low-frequency artifacts or motion noise.
+    if 'half_width' in df.columns:
+        hw_ms = df['half_width'] * 1000  # convert s → ms
+        noise_mask |= (hw_ms.notna() & (hw_ms > max_half_width_ms))
+
+    df.loc[noise_mask, 'unit_class'] = 'noise'
+
+    # ── Stage B: Somatic vs axonal (non-noise only) ──────────────────────
+    # Axonal recordings have positive-dominant waveforms: the peak (positive)
+    # is larger in magnitude than the trough (negative). In SI's convention,
+    # peak_trough_ratio = peak/trough, so |ratio| > 1 means peak dominates.
+    good_mask = df['unit_class'] == 'good'
+
+    axonal_mask = good_mask.copy()
+    if 'peak_trough_ratio' in df.columns:
+        # |ratio| > threshold means the positive peak dominates the trough
+        axonal_mask &= (df['peak_trough_ratio'].abs() > axonal_pt_ratio_thresh)
+    else:
+        axonal_mask[:] = False
+    # Narrow spatial footprint required for axonal
+    if 'spread' in df.columns:
+        has_spread = df['spread'].notna()
+        axonal_mask &= (~has_spread | (df['spread'] < axonal_max_spread_um))
+
+    df.loc[good_mask & ~axonal_mask, 'recording_type'] = 'somatic'
+    df.loc[axonal_mask, 'recording_type'] = 'axonal'
+
+    # ── Stage C: Cell type for somatic units ──────────────────────────────
+    somatic_mask = df['recording_type'] == 'somatic'
+
+    if 'peak_to_valley' in df.columns:
+        ns_mask = somatic_mask & (df['peak_to_valley'] <= ns_peak_to_valley_s)
+        bs_mask = somatic_mask & (df['peak_to_valley'] > ns_peak_to_valley_s)
+        df.loc[ns_mask, 'cell_type'] = 'NS'
+        df.loc[bs_mask, 'cell_type'] = 'BS'
+
+    # ── Stage D: Artifact voting (2-of-3 novel metric rule) ───────────
+    if artifact_voting:
+        fs = analyzer.recording.get_sampling_frequency()
+        positions = analyzer.get_channel_locations()
+
+        # Compute novel metrics for all units
+        spatial_decay_vals = np.full(len(df), np.nan)
+        isi_cv_vals = np.full(len(df), np.nan)
+        dur_10pct_vals = np.full(len(df), np.nan)
+
+        for i, uid in enumerate(unit_ids):
+            uid_idx = all_unit_ids.index(uid)
+            template = templates[uid_idx]
+            ptp_per_ch = np.ptp(template, axis=0)
+            peak_ch = np.argmax(ptp_per_ch)
+            peak_ptp = ptp_per_ch[peak_ch]
+
+            # Spatial decay rate
+            if peak_ptp > 1e-12:
+                peak_pos = positions[peak_ch]
+                distances = np.sqrt(np.sum(
+                    (positions - peak_pos) ** 2, axis=1))
+                valid = ((ptp_per_ch > 0.01 * peak_ptp) &
+                         (distances > 0))
+                if np.sum(valid) >= 3:
+                    d = distances[valid]
+                    log_a = np.log(np.clip(
+                        ptp_per_ch[valid] / peak_ptp, 1e-10, None))
+                    try:
+                        coeffs = np.polyfit(d, log_a, 1)
+                        if coeffs[0] < 0:
+                            spatial_decay_vals[i] = -1.0 / coeffs[0]
+                    except Exception:
+                        pass
+
+            # ISI coefficient of variation
+            spike_train = analyzer.sorting.get_unit_spike_train(uid)
+            if len(spike_train) >= 10:
+                isi = np.diff(spike_train) / fs
+                mean_isi = np.mean(isi)
+                if mean_isi > 1e-12:
+                    isi_cv_vals[i] = np.std(isi) / mean_isi
+
+            # Duration at 10% amplitude
+            wf = template[:, peak_ch]
+            baseline = np.mean(wf[:max(3, int(0.1 * len(wf)))])
+            ptp_wf = np.ptp(wf)
+            if ptp_wf > 1e-12:
+                thresh_10 = 0.10 * ptp_wf
+                above = np.where(
+                    np.abs(wf - baseline) > thresh_10)[0]
+                if len(above) >= 2:
+                    dur_10pct_vals[i] = (
+                        (above[-1] - above[0]) / fs * 1000)
+
+        df['spatial_decay_um'] = spatial_decay_vals
+        df['isi_cv'] = isi_cv_vals
+        df['duration_10pct_ms'] = dur_10pct_vals
+
+        # Apply voting: flag units that violate >= N of 3 criteria
+        still_good = df['unit_class'] == 'good'
+        v1 = (df['spatial_decay_um'] > artifact_max_spatial_decay_um) | (
+            df['spatial_decay_um'].isna())
+        v2 = (df['isi_cv'] < artifact_min_isi_cv) | df['isi_cv'].isna()
+        v3 = (df['duration_10pct_ms'] > artifact_max_duration_10pct_ms) | (
+            df['duration_10pct_ms'].isna())
+
+        n_violations = v1.astype(int) + v2.astype(int) + v3.astype(int)
+        artifact_mask = still_good & (n_violations >= artifact_min_violations)
+
+        df.loc[artifact_mask, 'unit_class'] = 'noise'
+        df.loc[artifact_mask, 'recording_type'] = pd.NA
+        df.loc[artifact_mask, 'cell_type'] = pd.NA
+
+    return df
 
 
 def plot_summary(analyzer, sorting, recording, output_dir,
