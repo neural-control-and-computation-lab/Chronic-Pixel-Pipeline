@@ -46,7 +46,7 @@ echo.
 echo ==================================================
 echo  Step 1: Spike sorting all 4 surveys with KS4
 echo ==================================================
-python sort_survey.py all 2>&1 | tee logs\sort_all.log
+powershell -Command "python sort_survey.py all 2>&1 | Tee-Object -FilePath logs\sort_all.log"
 if "%MODE%"=="sort" goto done
 
 :skip_sort
@@ -59,7 +59,7 @@ echo.
 echo ==================================================
 echo  Step 2: Cross-day neuron tracking with UnitMatch
 echo ==================================================
-python track_neurons.py 20260226 20260302 20260304 20260306 2>&1 | tee logs\track_neurons.log
+powershell -Command "python track_neurons.py 20260226 20260302 20260304 20260306 2>&1 | Tee-Object -FilePath logs\track_neurons.log"
 
 :done
 echo.
