@@ -275,19 +275,35 @@ def sort_and_analyze_banks(survey_dir, output_dir, fig_dir, torch_device=None):
             templates_from_data=True, batch_size=30000,
         )
 
-        logger.info("  Running kilosort4...")
-        try:
-            sorting = si.run_sorter(
-                'kilosort4', rec_pp, folder=sort_dir,
-                remove_existing_folder=True, **ks_kwargs)
-            n_units = len(sorting.unit_ids)
-            total_spikes = sum(sorting.count_num_spikes_per_unit().values())
-            logger.info("  KS4: %d units, %d spikes", n_units, total_spikes)
-        except Exception as e:
-            logger.warning("  KS4 failed: %s", e)
+        # Resume support: skip KS4 if sorter_output already exists
+        existing_sorter = sort_dir / 'sorter_output'
+        if existing_sorter.exists() and (existing_sorter / 'spike_clusters.npy').exists():
+            logger.info("  Resuming — loading existing KS4 output from %s", sort_dir)
+            try:
+                sorting = si.read_sorter_folder(sort_dir)
+                n_units = len(sorting.unit_ids)
+                total_spikes = sum(sorting.count_num_spikes_per_unit().values())
+                logger.info("  KS4 (cached): %d units, %d spikes", n_units, total_spikes)
+            except Exception as e:
+                logger.warning("  Failed to load cached sorting: %s — re-running", e)
+                sorting = None
+        else:
             sorting = None
-            n_units = 0
-            total_spikes = 0
+
+        if sorting is None:
+            logger.info("  Running kilosort4...")
+            try:
+                sorting = si.run_sorter(
+                    'kilosort4', rec_pp, folder=sort_dir,
+                    remove_existing_folder=True, **ks_kwargs)
+                n_units = len(sorting.unit_ids)
+                total_spikes = sum(sorting.count_num_spikes_per_unit().values())
+                logger.info("  KS4: %d units, %d spikes", n_units, total_spikes)
+            except Exception as e:
+                logger.warning("  KS4 failed: %s", e)
+                sorting = None
+                n_units = 0
+                total_spikes = 0
 
         result = {
             'bank': bank_id,
