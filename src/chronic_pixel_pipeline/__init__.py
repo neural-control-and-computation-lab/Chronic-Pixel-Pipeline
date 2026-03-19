@@ -28,7 +28,13 @@ from .io import load_all_segments, load_concatenated, load_imu, load_segment
 from .packet import count_packets, detect_format, extract_imu, parse_header
 
 # ── Probe geometry ────────────────────────────────────────────────────────────
-from .probe_geometry import electrode_positions, make_full_probe, make_probe_for_bank
+from .probe_geometry import (
+    electrode_positions,
+    make_full_probe,
+    make_probe_for_bank,
+    make_probe_from_trodesconf,
+    parse_trodesconf_channel_map,
+)
 
 # ── Recording extractor ──────────────────────────────────────────────────────
 from .recording import SpikeGadgetsNPXRecording, SpikeGadgetsNPXRecordingSegment
@@ -53,7 +59,9 @@ __all__ = [
     # Probe geometry
     "electrode_positions",
     "make_probe_for_bank",
+    "make_probe_from_trodesconf",
     "make_full_probe",
+    "parse_trodesconf_channel_map",
     # Preprocessing
     "remove_bad_channels",
     "preprocess",

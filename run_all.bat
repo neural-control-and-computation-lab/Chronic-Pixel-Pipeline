@@ -1,16 +1,18 @@
 @echo off
-REM Run the full pipeline: sort all 4 surveys, then track neurons across days.
+REM Run the full pipeline: sort, compute quality metrics, generate figures, track neurons.
 REM
 REM Usage (from Anaconda Prompt with cpp env active):
-REM   run_all.bat                    -- sort all + track
+REM   run_all.bat                    -- full pipeline (sort + metrics + figures + track)
 REM   run_all.bat sort               -- sort only
+REM   run_all.bat metrics            -- precompute waveform quality only
+REM   run_all.bat figures            -- generate unit figures only
 REM   run_all.bat track              -- track only (assumes sorting done)
 REM
 REM Prerequisites:
 REM   1. Run setup_env.bat first to create the conda environment
 REM   2. Set DATA_ROOT to your SpikeGLX data directory:
-REM        set DATA_ROOT=C:\Users\YourName\data\TRODES_test
-REM   3. Copy the 4 survey directories into DATA_ROOT
+REM        set DATA_ROOT=E:\
+REM   3. Survey directories should exist in DATA_ROOT
 REM
 REM All outputs (sorting_output, figures, logs) are written inside DATA_ROOT
 REM so nothing goes through Dropbox or other cloud sync.
@@ -26,18 +28,6 @@ echo  DATA_ROOT: %DATA_ROOT%
 echo  Logs:      %LOG_DIR%
 echo ==================================================
 
-REM Check data exists
-for %%d in (
-    "SvyPrb_2026-02-26T11.58.07_g0"
-    "SvyPrb_2026-03-02T14.10.26_g0"
-    "SvyPrb_2026-03-04T10.17.50_g0"
-    "SvyPrb_2026-03-06T10.01.15_g0"
-) do (
-    if not exist "%DATA_ROOT%\%%~d" (
-        echo WARNING: Missing data directory: %DATA_ROOT%\%%~d
-    )
-)
-
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 
 set MODE=%1
@@ -50,12 +40,38 @@ goto skip_sort
 :sort
 echo.
 echo ==================================================
-echo  Step 1: Spike sorting all 4 surveys with KS4
+echo  Step 1: Spike sorting all surveys with KS4
 echo ==================================================
 powershell -Command "python sort_survey.py all 2>&1 | Tee-Object -FilePath '%LOG_DIR%\sort_all.log'"
 if "%MODE%"=="sort" goto done
 
 :skip_sort
+if "%MODE%"=="metrics" goto metrics
+if "%MODE%"=="all" goto metrics
+goto skip_metrics
+
+:metrics
+echo.
+echo ==================================================
+echo  Step 2: Precompute waveform quality metrics
+echo ==================================================
+powershell -Command "python precompute_waveform_quality.py 2>&1 | Tee-Object -FilePath '%LOG_DIR%\precompute_quality.log'"
+if "%MODE%"=="metrics" goto done
+
+:skip_metrics
+if "%MODE%"=="figures" goto figures
+if "%MODE%"=="all" goto figures
+goto skip_figures
+
+:figures
+echo.
+echo ==================================================
+echo  Step 3: Generate single-neuron figures
+echo ==================================================
+powershell -Command "python run_single_neuron_plots.py 2>&1 | Tee-Object -FilePath '%LOG_DIR%\single_neuron_plots.log'"
+if "%MODE%"=="figures" goto done
+
+:skip_figures
 if "%MODE%"=="track" goto track
 if "%MODE%"=="all" goto track
 goto done
@@ -63,9 +79,9 @@ goto done
 :track
 echo.
 echo ==================================================
-echo  Step 2: Cross-day neuron tracking with UnitMatch
+echo  Step 4: Cross-day neuron tracking with UnitMatch
 echo ==================================================
-powershell -Command "python track_neurons.py 20260226 20260302 20260304 20260306 2>&1 | Tee-Object -FilePath '%LOG_DIR%\track_neurons.log'"
+powershell -Command "python track_neurons.py 2>&1 | Tee-Object -FilePath '%LOG_DIR%\track_neurons.log'"
 
 :done
 echo.

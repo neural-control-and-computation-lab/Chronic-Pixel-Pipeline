@@ -62,6 +62,10 @@ SURVEY_DIRS = {
     '20260302': 'SvyPrb_2026-03-02T14.10.26_g0',
     '20260304': 'SvyPrb_2026-03-04T10.17.50_g0',
     '20260306': 'SvyPrb_2026-03-06T10.01.15_g0',
+    '20260309': 'SvyPrb_2026-03-09T13.27.11_g0',
+    '20260311': 'SvyPrb_2026-03-11T09.52.30_g0',
+    '20260313': 'SvyPrb_2026-03-13T13.14.59_g0',
+    '20260316': 'SvyPrb_2026-03-16T10.56.17_g0',
 }
 
 # Derived helper — sort output for a given survey date
@@ -106,29 +110,52 @@ def load_analyzer_data(cache_dir):
     tm_path = cache_dir / 'extensions/template_metrics/metrics.csv'
     tm = pd.read_csv(tm_path, index_col=0) if tm_path.exists() else None
 
+    # Per-channel noise levels (for brain-tissue criterion)
+    noise_path = cache_dir / 'extensions/noise_levels/noise_levels.npy'
+    noise_levels = np.load(noise_path) if noise_path.exists() else None
+
+    # Waveform quality metrics (for boundary noise detection)
+    wq_path = cache_dir / 'extensions/waveform_quality/metrics.csv'
+    waveform_quality = pd.read_csv(wq_path, index_col=0) if wq_path.exists() else None
+
     return {
         'templates': templates,
         'unit_ids': unit_ids,
         'channel_positions': channel_positions,
         'qm': qm,
         'tm': tm,
+        'noise_levels': noise_levels,
+        'waveform_quality': waveform_quality,
     }
 
 
-def get_good_unit_ids(qm, tm=None, templates=None, fr_thresh=0.1,
+def get_good_unit_ids(qm, tm=None, templates=None, noise_levels=None,
+                      waveform_quality=None,
+                      fr_thresh=0.1,
                       isi_thresh=0.5, min_amplitude_uv=25.0,
                       min_n_spatial_channels=2,
                       max_n_spatial_channels=30,
                       max_half_width_ms=0.8,
                       min_amp_spatial_product=50.0,
                       max_spread_um=1500,
-                      max_peaks=2):
+                      max_peaks=2,
+                      min_peak_noise_uv=2.5):
     """Classify good units using advanced artifact criteria.
 
     Uses the same multi-stage noise detection as classify_units_advanced
     in analysis.py, applied directly from cached template metrics and
     quality metrics DataFrames.  Falls back to basic SNR/FR/ISI filtering
     when template metrics are unavailable.
+
+    Parameters
+    ----------
+    noise_levels : array-like or None
+        Per-channel noise floor (µV) from the noise_levels extension.
+        Used to flag units on quiet channels (likely outside brain).
+    min_peak_noise_uv : float
+        Minimum noise floor (µV) at a unit's peak channel.  Brain tissue
+        has broadband neural activity that raises the noise floor; channels
+        below this threshold are likely not in brain tissue.
     """
     snr = qm['snr'].dropna()
     if len(snr) == 0:
@@ -192,6 +219,22 @@ def get_good_unit_ids(qm, tm=None, templates=None, fr_thresh=0.1,
             hw_ms = tm.reindex(qm.index)['half_width'] * 1000
             noise_mask |= (hw_ms.notna() & (hw_ms > max_half_width_ms)).values
 
+        # Low noise floor — channel likely outside brain tissue
+        if noise_levels is not None:
+            for i, uid in enumerate(all_unit_ids):
+                if uid not in tm.index:
+                    continue
+                template = templates[i]
+                peak_ch = np.argmax(np.ptp(template, axis=0))
+                if noise_levels[peak_ch] < min_peak_noise_uv:
+                    noise_mask[i] = True
+
+        # Waveform quality — boundary noise (n_spat<=2 AND amp<50)
+        if waveform_quality is not None:
+            wq = waveform_quality.reindex(all_unit_ids)
+            boundary_flag = wq['boundary_noise_flag'].fillna(False).values.astype(bool)
+            noise_mask |= boundary_flag
+
         # Remove artifacts from good mask
         mask = mask & ~noise_mask
 
@@ -219,7 +262,9 @@ def prepare_um_session(date_key, bank_id, um_input_dir):
     # Load data directly from files
     data = load_analyzer_data(cache_dir)
     good_ids = get_good_unit_ids(data['qm'], tm=data['tm'],
-                                 templates=data['templates'])
+                                 templates=data['templates'],
+                                 noise_levels=data['noise_levels'],
+                                 waveform_quality=data['waveform_quality'])
     if len(good_ids) == 0:
         logger.info("  %s bank %d: 0 good units, skipping", date_key, bank_id)
         return None
@@ -717,7 +762,9 @@ def plot_matched_unit_diagnostics(all_matches_df, date_keys, fig_dir,
                 continue
             qm = data['qm']
             good = get_good_unit_ids(qm, tm=data['tm'],
-                                     templates=data['templates'])
+                                     templates=data['templates'],
+                                     noise_levels=data['noise_levels'],
+                                     waveform_quality=data['waveform_quality'])
             positions = data['channel_positions']
 
             for uid in good:
@@ -833,11 +880,14 @@ def plot_matched_unit_diagnostics(all_matches_df, date_keys, fig_dir,
     logger.info("Saved: %s", out)
 
 
-def plot_ptrack_vs_days(all_matches_df, date_keys, fig_dir):
-    """P(track) vs days between recordings (cf. Fig 5e, van Beest 2024).
+def plot_trackability_curve(all_um_results, date_keys, fig_dir):
+    """Neuron trackability as a function of time interval.
 
-    For each pair of sessions, computes the fraction of good units that
-    were successfully tracked and plots against the time interval.
+    For each unique neuron (bank + UID), find all sessions where it was
+    detected and compute the max time span between earliest and latest
+    appearance.  A neuron with max span S counts as "trackable" for every
+    interval d ∈ [1, S].  The resulting survival-style curve shows what
+    proportion of all neurons remain trackable at each interval.
     """
     import matplotlib
     matplotlib.use('Agg')
@@ -846,114 +896,130 @@ def plot_ptrack_vs_days(all_matches_df, date_keys, fig_dir):
 
     fig_dir = Path(fig_dir)
 
-    # Parse dates
-    dates = {dk: datetime.strptime(dk, '%Y%m%d') for dk in date_keys}
+    # Parse recording dates
+    parsed_dates = {dk: datetime.strptime(dk, '%Y%m%d') for dk in date_keys}
 
-    # For each pair of sessions, count trackable and tracked units
-    pair_stats = []
-    for i, dk1 in enumerate(date_keys):
-        for j, dk2 in enumerate(date_keys):
-            if j <= i:
-                continue
-            delta_days = (dates[dk2] - dates[dk1]).days
+    max_spans = []          # max span in days for each unique neuron
+    per_bank_counts = {}    # bank_id -> (n_total, n_tracked)
 
-            total_good_1 = 0
-            total_good_2 = 0
-            total_tracked = 0
+    for bank_id, um in all_um_results.items():
+        uids = um['UIDs']
+        session_id = um['session_id']
+        active_dates = um['active_dates']
 
-            for bank_id in range(12):
-                cache1 = (DATA_ROOT / 'sorting_output' / f'survey_{dk1}'
-                          / f'bank{bank_id:02d}_ks4' / 'analyzer_cache')
-                cache2 = (DATA_ROOT / 'sorting_output' / f'survey_{dk2}'
-                          / f'bank{bank_id:02d}_ks4' / 'analyzer_cache')
+        n_tracked_bank = 0
+        n_total_bank = 0
 
-                if not (cache1 / 'spikeinterface_info.json').exists():
-                    continue
-                if not (cache2 / 'spikeinterface_info.json').exists():
-                    continue
+        for uid in np.unique(uids):
+            n_total_bank += 1
+            mask = uids == uid
+            sessions = np.unique(session_id[mask])
+            neuron_dates = [active_dates[int(s)] for s in sessions]
 
-                data1 = load_analyzer_data(cache1)
-                data2 = load_analyzer_data(cache2)
-                good1 = get_good_unit_ids(data1['qm'], tm=data1['tm'],
-                                           templates=data1['templates'])
-                good2 = get_good_unit_ids(data2['qm'], tm=data2['tm'],
-                                           templates=data2['templates'])
+            if len(neuron_dates) < 2:
+                max_spans.append(0)
+            else:
+                n_tracked_bank += 1
+                dt_vals = [parsed_dates[d] for d in neuron_dates]
+                span = (max(dt_vals) - min(dt_vals)).days
+                max_spans.append(span)
 
-                total_good_1 += len(good1)
-                total_good_2 += len(good2)
+        per_bank_counts[bank_id] = (n_total_bank, n_tracked_bank)
 
-                # Count tracked pairs for this bank and session pair
-                s1, s2 = str(dk1), str(dk2)
-                bank_matches = all_matches_df[
-                    (all_matches_df['bank'] == bank_id) &
-                    (((all_matches_df['session_1'].astype(str) == s1) &
-                      (all_matches_df['session_2'].astype(str) == s2)) |
-                     ((all_matches_df['session_1'].astype(str) == s2) &
-                      (all_matches_df['session_2'].astype(str) == s1)))
-                ]
-                total_tracked += len(bank_matches)
+    max_spans = np.array(max_spans)
+    total_neurons = len(max_spans)
+    n_ever_tracked = int(np.sum(max_spans > 0))
 
-            n_trackable = min(total_good_1, total_good_2)
-            p_track = total_tracked / n_trackable if n_trackable > 0 else 0
-
-            pair_stats.append({
-                'session_1': dk1, 'session_2': dk2,
-                'delta_days': delta_days,
-                'n_good_1': total_good_1, 'n_good_2': total_good_2,
-                'n_tracked': total_tracked, 'n_trackable': n_trackable,
-                'p_track': p_track,
-            })
-
-    if not pair_stats:
+    if total_neurons == 0:
+        logger.info("No neurons available for trackability analysis.")
         return
 
-    df = pd.DataFrame(pair_stats)
-    logger.info("P(track) analysis:\n%s",
-                df[['session_1', 'session_2', 'delta_days',
-                    'n_tracked', 'n_trackable', 'p_track']].to_string())
+    # Compute trackability at each interval (1 day .. max span)
+    max_possible = int(max_spans.max()) if len(max_spans) > 0 else 0
+    if max_possible == 0:
+        logger.info("No neurons tracked across sessions — skipping curve.")
+        return
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-    fig.suptitle('Tracking Yield Across Recording Intervals',
+    intervals = np.arange(1, max_possible + 1)
+    prop_of_all = np.array([np.sum(max_spans >= d) / total_neurons
+                            for d in intervals])
+    prop_of_tracked = np.array([np.sum(max_spans >= d) / n_ever_tracked
+                                for d in intervals])
+
+    logger.info("Trackability analysis:")
+    logger.info("  Total unique neurons (all banks): %d", total_neurons)
+    logger.info("  Neurons tracked across ≥2 sessions: %d (%.1f%%)",
+                n_ever_tracked, 100 * n_ever_tracked / total_neurons)
+    for d, p_all, p_tr in zip(intervals, prop_of_all, prop_of_tracked):
+        n = int(np.sum(max_spans >= d))
+        logger.info("  ≥%2d days:  %4d neurons  (%.1f%% of all, %.1f%% of tracked)",
+                     d, n, 100 * p_all, 100 * p_tr)
+
+    # ---- Figure ----
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    fig.suptitle('Neuron Trackability Across Recording Intervals',
                  fontsize=14, fontweight='bold')
 
-    # Panel A: P(track) vs delta-days
+    # Panel A: Survival curve — proportion trackable vs interval
     ax = axes[0]
-    ax.scatter(df['delta_days'], df['p_track'], s=120, c='#4472C4',
-               edgecolors='k', linewidth=0.8, zorder=5)
-    for _, row in df.iterrows():
-        lbl = (f"{row['session_1'][4:6]}/{row['session_1'][6:]}"
-               f"\nvs\n{row['session_2'][4:6]}/{row['session_2'][6:]}")
-        ax.annotate(lbl, (row['delta_days'], row['p_track']),
-                    fontsize=6, ha='center', va='top',
-                    xytext=(0, -14), textcoords='offset points')
-    ax.set_xlabel('Days Between Recordings')
-    ax.set_ylabel('P(track)')
-    ax.set_ylim(-0.05, max(df['p_track'].max() * 1.15, 0.5))
-    ax.set_title('Probability of Tracking vs Time Interval')
+    ax.step(intervals, prop_of_all * 100, where='mid',
+            color='#4472C4', linewidth=2.5, label='% of all neurons')
+    ax.step(intervals, prop_of_tracked * 100, where='mid',
+            color='#ED7D31', linewidth=2.5, linestyle='--',
+            label='% of tracked neurons')
+    for d, p in zip(intervals, prop_of_all):
+        n = int(np.sum(max_spans >= d))
+        ax.annotate(f'{n}', (d, p * 100),
+                    fontsize=8, ha='center', va='bottom',
+                    xytext=(0, 6), textcoords='offset points',
+                    color='#4472C4')
+    ax.set_xlabel('Minimum Interval (days)')
+    ax.set_ylabel('Proportion of Neurons (%)')
+    ax.set_title('Trackability Survival Curve')
+    ax.set_xlim(0.5, max_possible + 0.5)
+    ax.set_ylim(0, max(prop_of_tracked.max() * 100 * 1.2, 50))
+    ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
 
-    # Panel B: Number tracked per pair
+    # Panel B: Histogram of max spans (tracked neurons only)
     ax = axes[1]
-    x_pos = range(len(df))
-    bars = ax.bar(x_pos, df['n_tracked'], color='#ED7D31', alpha=0.8,
-                  edgecolor='k', linewidth=0.5)
-    ax.bar(x_pos, df['n_trackable'], color='#4472C4', alpha=0.25,
-           edgecolor='k', linewidth=0.3, label='Trackable')
-    ax.set_xticks(list(x_pos))
-    ax.set_xticklabels(
-        [f"{r['session_1'][-4:]}\nvs\n{r['session_2'][-4:]}"
-         for _, r in df.iterrows()], fontsize=8)
-    ax.set_ylabel('Number of Units')
-    ax.set_title('Tracked vs Trackable per Session Pair')
-    for i, (_, row) in enumerate(df.iterrows()):
-        ax.text(i, row['n_tracked'] + 2,
-                f"{row['n_tracked']}/{row['n_trackable']}\n"
-                f"({row['p_track']:.1%})",
-                ha='center', va='bottom', fontsize=7)
-    ax.legend(loc='upper right')
+    tracked_spans = max_spans[max_spans > 0]
+    if len(tracked_spans) > 0:
+        bins = np.arange(0.5, max_possible + 1.5, 1)
+        ax.hist(tracked_spans, bins=bins, color='#70AD47', alpha=0.8,
+                edgecolor='k', linewidth=0.5)
+        ax.set_xlabel('Max Tracking Span (days)')
+        ax.set_ylabel('Number of Neurons')
+        ax.set_title(f'Distribution of Max Tracking Span\n'
+                     f'(n={len(tracked_spans)} tracked neurons, '
+                     f'median={np.median(tracked_spans):.0f} days)')
+        ax.axvline(np.median(tracked_spans), color='red', linewidth=1.5,
+                   linestyle='--', label=f'Median = {np.median(tracked_spans):.0f} d')
+        ax.legend(fontsize=9)
+
+    # Panel C: Per-bank breakdown
+    ax = axes[2]
+    bank_ids = sorted(per_bank_counts.keys())
+    n_totals = [per_bank_counts[b][0] for b in bank_ids]
+    n_trackeds = [per_bank_counts[b][1] for b in bank_ids]
+    y_pos = np.arange(len(bank_ids))
+    ax.barh(y_pos, n_totals, color='#4472C4', alpha=0.3,
+            edgecolor='k', linewidth=0.3, label='All neurons')
+    ax.barh(y_pos, n_trackeds, color='#ED7D31', alpha=0.8,
+            edgecolor='k', linewidth=0.5, label='Tracked (≥2 sessions)')
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels([f'Bank {b}' for b in bank_ids])
+    ax.set_xlabel('Number of Unique Neurons')
+    ax.set_title('Tracked vs Total per Bank')
+    ax.invert_yaxis()
+    for i, (nt, ntr) in enumerate(zip(n_totals, n_trackeds)):
+        pct = 100 * ntr / nt if nt > 0 else 0
+        ax.text(nt + 1, i, f'{ntr}/{nt} ({pct:.0f}%)',
+                va='center', fontsize=7)
+    ax.legend(fontsize=9, loc='lower right')
 
     fig.tight_layout()
-    out = fig_dir / 'ptrack_vs_days.png'
+    out = fig_dir / 'trackability_curve.png'
     fig.savefig(out, dpi=200, bbox_inches='tight')
     plt.close(fig)
     logger.info("Saved: %s", out)
@@ -1086,6 +1152,7 @@ def main():
         # Run UnitMatch
         try:
             um_result = run_unitmatch_bank(bank_id, session_dirs, um_input_dir)
+            um_result['active_dates'] = active_dates
             all_um_results[bank_id] = um_result
 
             # Extract matches
@@ -1136,9 +1203,9 @@ def main():
         # Paper-inspired analyses (van Beest et al. 2024)
         logger.info("\nGenerating paper-inspired analyses...")
         try:
-            plot_ptrack_vs_days(all_matches_df, date_keys, FIG_DIR)
+            plot_trackability_curve(all_um_results, date_keys, FIG_DIR)
         except Exception as e:
-            logger.warning("P(track) vs days plot failed: %s", e)
+            logger.warning("Trackability curve failed: %s", e)
             import traceback
             traceback.print_exc()
 

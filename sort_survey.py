@@ -80,6 +80,10 @@ SURVEYS = {
     '20260302': 'SvyPrb_2026-03-02T14.10.26_g0',
     '20260304': 'SvyPrb_2026-03-04T10.17.50_g0',
     '20260306': 'SvyPrb_2026-03-06T10.01.15_g0',
+    '20260309': 'SvyPrb_2026-03-09T13.27.11_g0',
+    '20260311': 'SvyPrb_2026-03-11T09.52.30_g0',
+    '20260313': 'SvyPrb_2026-03-13T13.14.59_g0',
+    '20260316': 'SvyPrb_2026-03-16T10.56.17_g0',
 }
 
 
@@ -172,7 +176,8 @@ def find_meta_file(survey_dir):
     return metas[0]
 
 
-def sort_and_analyze_banks(survey_dir, output_dir, fig_dir, torch_device=None):
+def sort_and_analyze_banks(survey_dir, output_dir, fig_dir, torch_device=None,
+                           bank_filter=None, force=False):
     """Sort all banks and return results list."""
     import spikeinterface.full as si
     from chronic_pixel_pipeline.preprocessing import preprocess
@@ -222,6 +227,9 @@ def sort_and_analyze_banks(survey_dir, output_dir, fig_dir, torch_device=None):
 
     for bw in bank_windows:
         bank_id = bw['bank']
+        if bank_filter is not None and bank_id not in bank_filter:
+            logger.info("  Skipping bank %d (not in filter)", bank_id)
+            continue
         logger.info("\n" + "=" * 70)
         logger.info("BANK %d — %.1fs of data", bank_id, bw['duration'])
         logger.info("=" * 70)
@@ -249,7 +257,7 @@ def sort_and_analyze_banks(survey_dir, output_dir, fig_dir, torch_device=None):
 
         # Preprocess
         rec_pp = preprocess(rec_bank, freq_min=300, freq_max=6000,
-                            destripe=True, cmr=False, phase_shift=True)
+                            destripe=False, cmr=False, phase_shift=True)
 
         snip_pp = rec_pp.get_traces(
             start_frame=int(1.0 * fs), end_frame=int((1.0 + snippet_dur) * fs),
@@ -268,16 +276,25 @@ def sort_and_analyze_banks(survey_dir, output_dir, fig_dir, torch_device=None):
                 n_active += 1
         logger.info("  Active channels: %d/%d", n_active, rec_pp.get_num_channels())
 
-        # Spike sort with KS4 (nblocks=1 enables drift correction)
+        # Spike sort with KS4
+        # templates_from_data=False: use pre-built universal templates.
+        # Data-driven templates (True) fail on banks with few spikes because
+        # extract_wPCA_wTEMP needs >=6 clips for KMeans but sparse banks
+        # don't produce enough above the Th_single_ch threshold.
+        # nblocks=1: drift correction enabled (single block sufficient for
+        # ~58s survey banks).
         sort_dir = output_dir / f'bank{bank_id:02d}_ks4'
         ks_kwargs = dict(
             verbose=False, torch_device=torch_device, nblocks=1,
-            templates_from_data=True, batch_size=30000,
+            templates_from_data=False, batch_size=30000,
+            dminx=103,                 # NP1032 column spacing (103µm, not 32µm)
+            max_channel_distance=150,  # Include both columns (103µm apart)
+            nearest_chans=20,          # More neighbors for multi-channel spread
         )
 
         # Resume support: skip KS4 if sorter_output already exists
         existing_sorter = sort_dir / 'sorter_output'
-        if existing_sorter.exists() and (existing_sorter / 'spike_clusters.npy').exists():
+        if not force and existing_sorter.exists() and (existing_sorter / 'spike_clusters.npy').exists():
             logger.info("  Resuming — loading existing KS4 output from %s", sort_dir)
             try:
                 sorting = si.read_sorter_folder(sort_dir)
@@ -300,10 +317,42 @@ def sort_and_analyze_banks(survey_dir, output_dir, fig_dir, torch_device=None):
                 total_spikes = sum(sorting.count_num_spikes_per_unit().values())
                 logger.info("  KS4: %d units, %d spikes", n_units, total_spikes)
             except Exception as e:
-                logger.warning("  KS4 failed: %s", e)
-                sorting = None
-                n_units = 0
-                total_spikes = 0
+                err_str = str(e)
+                # Detect KS4 template extraction failures (ValueError wrapped
+                # by SpikeInterface's SpikeSortingError) — extract_wPCA_wTEMP
+                # fails when too few spike clips exceed Th_single_ch threshold
+                # for KMeans (needs n_clusters=6 samples). Retry with pre-built
+                # universal templates instead of data-driven ones.
+                is_template_error = (
+                    'n_samples=' in err_str and 'n_clusters=' in err_str
+                ) or (
+                    'Found array with 0 sample' in err_str
+                ) or (
+                    'extract_wPCA_wTEMP' in err_str
+                )
+                if not is_template_error:
+                    logger.warning("  KS4 failed: %s", e)
+                    sorting = None
+                    n_units = 0
+                    total_spikes = 0
+                else:
+                    logger.warning("  KS4 template extraction failed: %s", e)
+                    logger.info("  Retrying with templates_from_data=False "
+                                "(pre-built universal templates)...")
+                    try:
+                        ks_fallback = {**ks_kwargs, 'templates_from_data': False}
+                        sorting = si.run_sorter(
+                            'kilosort4', rec_pp, folder=sort_dir,
+                            remove_existing_folder=True, **ks_fallback)
+                        n_units = len(sorting.unit_ids)
+                        total_spikes = sum(sorting.count_num_spikes_per_unit().values())
+                        logger.info("  KS4 (universal templates): %d units, %d spikes",
+                                     n_units, total_spikes)
+                    except Exception as e2:
+                        logger.warning("  KS4 fallback also failed: %s", e2)
+                        sorting = None
+                        n_units = 0
+                        total_spikes = 0
 
         result = {
             'bank': bank_id,
@@ -405,6 +454,10 @@ def merge_bank_sortings(all_bank_results, output_dir):
     import pandas as pd
     df = pd.DataFrame(all_units)
     df.to_csv(merged_dir / 'merged_units.csv', index=False)
+
+    if len(df) == 0:
+        logger.info("\nMerged sorting: 0 units (no banks produced output)")
+        return df
 
     n_good = df['is_good'].sum()
     n_total = len(df)
@@ -691,16 +744,20 @@ def plot_full_probe(all_bank_results, fig_dir):
     logger.info("  Saved: %s", out_path)
 
 
-def sort_one_survey(key, survey_dir, output_dir, fig_dir=None, torch_device=None):
+def sort_one_survey(key, survey_dir, output_dir, fig_dir=None, torch_device=None,
+                    bank_filter=None, force=False):
     """Sort a single survey: all banks, merge, visualize."""
     if fig_dir is None:
         fig_dir = DATA_ROOT / 'figures' / 'sorting' / output_dir.name
     logger.info("Survey: %s", survey_dir)
     logger.info("Output: %s", output_dir)
     logger.info("Figures: %s", fig_dir)
+    if bank_filter is not None:
+        logger.info("Bank filter: %s", bank_filter)
 
     all_bank_results = sort_and_analyze_banks(
-        survey_dir, output_dir, fig_dir, torch_device=torch_device)
+        survey_dir, output_dir, fig_dir, torch_device=torch_device,
+        bank_filter=bank_filter, force=force)
 
     # Summary
     logger.info("\n" + "=" * 70)
@@ -738,22 +795,38 @@ def sort_one_survey(key, survey_dir, output_dir, fig_dir=None, torch_device=None
 
 
 def main():
-    torch_device = _detect_torch_device()
+    import argparse as _ap
+
+    parser = _ap.ArgumentParser(description='Sort SpikeGLX survey recording')
+    parser.add_argument('survey', nargs='?', default=None,
+                        help='Survey date key (e.g. 20260304), "all", or path')
+    parser.add_argument('output', nargs='?', default=None,
+                        help='Output directory (only with explicit path)')
+    parser.add_argument('--bank', type=int, nargs='+', default=None,
+                        help='Only sort specific bank(s), e.g. --bank 0 or --bank 0 1 2')
+    parser.add_argument('--device', type=str, default=None,
+                        help='Torch device (default: auto-detect)')
+    parser.add_argument('--force', action='store_true',
+                        help='Force re-sort even if output already exists')
+    args = parser.parse_args()
+
+    torch_device = args.device or _detect_torch_device()
+    bank_filter = set(args.bank) if args.bank is not None else None
+    force = args.force
     logger.info("DATA_ROOT: %s", DATA_ROOT)
 
-    # Parse command-line args
-    if len(sys.argv) >= 3 and sys.argv[1] != 'all':
+    if args.survey and args.output:
         # Explicit paths: sort_survey.py <survey_dir> <output_dir>
-        survey_dir = Path(sys.argv[1])
-        output_dir = Path(sys.argv[2])
+        survey_dir = Path(args.survey)
+        output_dir = Path(args.output)
         sort_one_survey('custom', survey_dir, output_dir,
-                        torch_device=torch_device)
+                        torch_device=torch_device, bank_filter=bank_filter,
+                        force=force)
 
-    elif len(sys.argv) == 2:
-        arg = sys.argv[1]
+    elif args.survey:
+        arg = args.survey
 
         if arg == 'all':
-            # Sort ALL known surveys sequentially
             logger.info("Sorting ALL %d surveys...", len(SURVEYS))
             for key in sorted(SURVEYS.keys()):
                 survey_dir = _survey_dir(key)
@@ -767,23 +840,25 @@ def main():
                 logger.info("# SURVEY %s", key)
                 logger.info("#" * 70)
                 sort_one_survey(key, survey_dir, output_dir,
-                                fig_dir=fig_dir, torch_device=torch_device)
+                                fig_dir=fig_dir, torch_device=torch_device,
+                                bank_filter=bank_filter, force=force)
         elif arg in SURVEYS:
-            # Sort by date key
             sort_one_survey(arg, _survey_dir(arg), _output_dir(arg),
-                            fig_dir=_fig_dir(arg), torch_device=torch_device)
+                            fig_dir=_fig_dir(arg), torch_device=torch_device,
+                            bank_filter=bank_filter, force=force)
         else:
-            # Assume it's a path
             survey_dir = Path(arg)
             date_str = survey_dir.name.split('_')[1].split('T')[0].replace('-', '')
             output_dir = DATA_ROOT / 'sorting_output' / f'survey_{date_str}'
             sort_one_survey(date_str, survey_dir, output_dir,
-                            torch_device=torch_device)
+                            torch_device=torch_device, bank_filter=bank_filter,
+                            force=force)
     else:
         # Default: latest survey
-        key = '20260306'
+        key = '20260316'
         sort_one_survey(key, _survey_dir(key), _output_dir(key),
-                        fig_dir=_fig_dir(key), torch_device=torch_device)
+                        fig_dir=_fig_dir(key), torch_device=torch_device,
+                        bank_filter=bank_filter, force=force)
 
 
 if __name__ == '__main__':

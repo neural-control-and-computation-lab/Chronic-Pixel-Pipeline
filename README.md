@@ -178,46 +178,91 @@ conda activate cpp
 ### Running
 
 ```bash
+# Set DATA_ROOT to the directory containing SpikeGLX survey folders
+export DATA_ROOT=/path/to/data   # Linux/macOS
+set DATA_ROOT=E:\                # Windows
+
+# Run individual pipeline steps
+python sort_survey.py all                  # 1. Sort all surveys
+python precompute_waveform_quality.py      # 2. Compute quality metrics
+python run_single_neuron_plots.py          # 3. Generate unit figures
+python track_neurons.py                    # 4. Track neurons across days
+
+# Or run the full pipeline at once
+run_all.bat          # Windows
+bash run_all.sh      # Linux / macOS
+
 # Sort a single survey by date key
 python sort_survey.py 20260226
 
-# Sort ALL known surveys
-python sort_survey.py all
+# Sort specific banks
+python sort_survey.py 20260226 --bank 0 2 5
 
-# Sort + track neurons across days (full pipeline)
-run_all.bat          # Windows
-bash run_all.sh      # Linux / macOS
+# Force re-sort (bypass resume logic)
+python sort_survey.py 20260226 --force
 ```
 
-Set the `DATA_ROOT` environment variable to point to the directory containing the SpikeGLX survey folders (e.g., `SvyPrb_2026-02-26T11.58.07_g0/`). On Windows this defaults to `%USERPROFILE%\data\TRODES_test`.
+### Pipeline Steps
 
-### What it does
+| Step | Script | Purpose |
+|------|--------|---------|
+| 1 | `sort_survey.py` | Parse survey timetable, preprocess, sort each bank with KS4, merge results |
+| 2 | `precompute_waveform_quality.py` | Compute waveform quality metrics and boundary-noise classification |
+| 3 | `run_single_neuron_plots.py` | Generate per-unit summary figures (good vs suspect) |
+| 4 | `track_neurons.py` | Cross-day neuron tracking with UnitMatch |
+
+### Sorting Details (`sort_survey.py`)
 
 1. **Parses** the SpikeGLX survey timetable (`svySBTT`) from the `.meta` file
-2. **Extracts** each bank's stable data window (skipping settle periods)
-3. **Assigns** correct NP1032 probe geometry per bank
-4. **Preprocesses** with bandpass + IBL destriping
-5. **Spike-sorts** each bank independently with Kilosort 4 (CUDA auto-detected, drift correction enabled)
-6. **Builds** SortingAnalyzer with quality metrics per bank
-7. **Merges** all bank sortings into one full-probe summary
-8. **Generates** diagnostic figures: full-probe overview, drift correction, spike depth scatter
+2. **Extracts** each bank's stable data window (skipping 2s settle periods)
+3. **Assigns** correct NP1032 probe geometry per bank (2-column, 103 µm spacing)
+4. **Preprocesses** with bandpass (300–6000 Hz) + IBL destriping
+5. **Spike-sorts** each bank independently with Kilosort 4 (`nblocks=1`, `templates_from_data=False`)
+6. **Retries** failed sorts with `templates_from_data=False` if template extraction fails
+7. **Builds** SortingAnalyzer with quality metrics per bank
+8. **Merges** all bank sortings into one full-probe summary CSV
+
+### Waveform Quality Classification (`precompute_waveform_quality.py`)
+
+Classifies units as real neurons vs boundary noise using six criteria with tiered thresholds based on spatial footprint size (units with ≥14 spatial channels get relaxed thresholds since large footprints indicate real neurons):
+
+- **C1/C2**: Small spatial footprint + low amplitude
+- **C3**: Low amplitude + low firing rate (tiered)
+- **C4**: High amplitude CV (tiered)
+- **C5**: Low SNR + moderate instability (small units only)
+- **C6**: Very small footprint + unstable amplitude
+
+### Unit Figures (`run_single_neuron_plots.py`)
+
+Generates 5-panel summary figures for each unit that passes the baseline quality gate:
+- Probe location map
+- Multi-channel template waveforms
+- Peak-channel mean waveform ± SD
+- Autocorrelogram
+- Spike amplitudes over time
+
+Units are classified into two tiers:
+- **`units/`** — pass both baseline and strict (waveform quality) criteria
+- **`units_suspect/`** — pass baseline but flagged by waveform quality
 
 ### Output
 
 ```
 sorting_output/survey_YYYYMMDD/
-    bank00_ks4/          # Per-bank KS4 output
-        sorter_output/   # Raw KS4 files (ops.npy with drift data)
-        analyzer_cache/  # SortingAnalyzer cache (templates, quality metrics)
+    bank00_ks4/
+        sorter_output/       # Raw KS4 files (ops.npy with drift data)
+        analyzer_cache/      # SortingAnalyzer cache (templates, quality metrics)
     bank01_ks4/
     ...
     merged/
-        merged_units.csv # All units across banks with depth, amplitude, quality
+        merged_units.csv     # All units across banks with depth, amplitude, quality
 
 figures/sorting/survey_YYYYMMDD/
-    survey_full_probe.png  # Unit locations, firing rates, amplitudes by depth
-    drift_correction.png   # Drift amount over time per bank
-    drift_scatter.png      # Spike depth scatter over time per bank
+    survey_full_probe.png    # Unit locations, firing rates, amplitudes by depth
+    drift_correction.png     # Drift amount over time per bank
+    drift_scatter.png        # Spike depth scatter over time per bank
+    units/                   # Per-unit figures (good units)
+    units_suspect/           # Per-unit figures (suspect units)
 ```
 
 ## Cross-Day Neuron Tracking
@@ -225,7 +270,7 @@ figures/sorting/survey_YYYYMMDD/
 Track neurons across multiple survey days using [UnitMatch](https://github.com/EnnyvanBeest/UnitMatch) (Naive Bayes waveform matching).
 
 ```bash
-# Track across all 4 survey dates
+# Track across all survey dates
 python track_neurons.py
 
 # Track specific dates
@@ -236,36 +281,43 @@ python track_neurons.py 20260226 20260302
 
 ```
 sorting_output/tracking/
-    tracking_summary.csv   # All matched pairs with probabilities and depths
-    bank00/                # Per-bank UnitMatch results
-        prob_matrix.npy    # Match probability matrix
-        UIDs.npy           # Unique neuron IDs
+    tracking_summary.csv     # All matched pairs with probabilities and depths
+    bank00/                  # Per-bank UnitMatch results
+        prob_matrix.npy      # Match probability matrix
+        UIDs.npy             # Unique neuron IDs
 
 figures/sorting/tracking/
-    tracking_summary.png   # Matches per bank, confidence distribution, depth consistency
-    tracking_full_probe.png # Full-probe tracking map across days
+    tracking_summary.png         # Matches per bank, confidence distribution
+    tracking_full_probe.png      # Full-probe tracking map across days
+    trackability_curve.png       # Neurons trackable vs span (days)
+    matched_waveforms_*.png      # Waveform overlays for matched pairs
+    matched_quality_metrics.png  # Quality metric consistency across days
+    depth_stability.png          # Depth stability of tracked neurons
+    similarity_scores.png        # Match probability distributions
 ```
 
 ## Package Structure
 
 ```
 src/chronic_pixel_pipeline/
-    __init__.py          # Public API exports
-    packet.py            # Packet format constants and parsing
-    recording.py         # SpikeInterface recording extractor
-    io.py                # High-level loading API
-    probe_geometry.py    # NP1032/NP1030 probe geometry
-    preprocessing.py     # Bad channel removal, bandpass, destripe
-    analysis.py          # Post-sorting analysis (SortingAnalyzer, quality metrics)
-    diagnostics.py       # Diagnostic visualization (sorting + timescan)
+    __init__.py              # Public API exports
+    packet.py                # Packet format constants and parsing
+    recording.py             # SpikeInterface recording extractor
+    io.py                    # High-level loading API
+    probe_geometry.py        # NP1032/NP1030 probe geometry
+    preprocessing.py         # Bad channel removal, bandpass, destripe
+    analysis.py              # Post-sorting analysis (SortingAnalyzer, quality metrics)
+    diagnostics.py           # Diagnostic visualization (sorting + timescan)
     scripts/
-        timescan.py      # CLI: cpp-scan
-        sort.py          # CLI: cpp-sort
+        timescan.py          # CLI: cpp-scan
+        sort.py              # CLI: cpp-sort
 
-sort_survey.py           # Survey-mode sorting pipeline (all banks + drift correction)
-track_neurons.py         # Cross-day neuron tracking with UnitMatch
-setup_env.sh / .bat      # Environment setup (conda + CUDA)
-run_all.sh / .bat        # Full pipeline orchestration
+sort_survey.py               # Step 1: Survey-mode sorting (KS4 per bank)
+precompute_waveform_quality.py  # Step 2: Waveform quality metrics & classification
+run_single_neuron_plots.py   # Step 3: Per-unit summary figures
+track_neurons.py             # Step 4: Cross-day neuron tracking (UnitMatch)
+setup_env.sh / .bat          # Environment setup (conda + CUDA)
+run_all.sh / .bat            # Full pipeline orchestration
 ```
 
 ## API Reference
