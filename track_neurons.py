@@ -66,7 +66,35 @@ SURVEY_DIRS = {
     '20260311': 'SvyPrb_2026-03-11T09.52.30_g0',
     '20260313': 'SvyPrb_2026-03-13T13.14.59_g0',
     '20260316': 'SvyPrb_2026-03-16T10.56.17_g0',
+    '20260319': 'SvyPrb_2026-03-19T10.11.39_g0',
+    '20260323': 'SvyPrb_2026-03-23T11.18.04_g0',
+    '20260326': 'SvyPrb_2026-03-26T11.33.18_g0',
+    '20260331': 'SvyPrb_2026-03-31T14.35.53_g0',
+    '20260402': 'SvyPrb_2026-04-02T14.08.31_g0',
+    '20260407': 'SvyPrb_2026-04-07T13.09.12_g0',
+    '20260409': 'SvyPrb_2026-04-09T14.36.02_g0',
+    '20260414': 'SvyPrb_2026-04-14T13.19.39_g0',
+    '20260417': 'SvyPrb_2026-04-17T10.24.24_g0',
+    '20260421': 'SvyPrb_2026-04-21T14.44.42_g0',
+    '20260424': 'SvyPrb_2026-04-24T12.31.37_g0',
+    '20260428': 'SvyPrb_2026-04-28T12.56.18_g0',
+    '20260501': 'SvyPrb_2026-05-01T13.06.12_g0',
+    '20260507': 'SvyPrb_2026-05-07T14.16.53_g0',
+    '20260512': 'SvyPrb_2026-05-12T13.38.51_g0',
+    '20260522': 'SvyPrb_2026-05-22T12.22.23_g0',
+    '20260526': 'SvyPrb_2026-05-26T13.16.22_g0',
+    '20260604': 'SvyPrb_2026-06-04T13.34.16_g0',
+    '20260611': 'SvyPrb_2026-06-11T14.09.05_g0',
+    '20260618': 'SvyPrb_2026-06-18T15.12.37_g0',
+    '20260625': 'SvyPrb_2026-06-25T10.11.07_g0',
+    '20260723': 'SvyPrb_2026-07-23T14.18.28_g0',
+    '20260730': 'SvyPrb_2026-07-30T14.27.42_g0',
 }
+
+# Surveys excluded from cross-day tracking analyses (still sorted, just not
+# used for matching / aggregate plots). 20260226 was the first post-surgery
+# recording and is too noisy to participate cleanly.
+EXCLUDE_SURVEYS = {'20260226'}
 
 # Derived helper — sort output for a given survey date
 SURVEYS = {
@@ -75,6 +103,7 @@ SURVEYS = {
         'sort_dir': DATA_ROOT / 'sorting_output' / f'survey_{key}',
     }
     for key, sdir in SURVEY_DIRS.items()
+    if key not in EXCLUDE_SURVEYS
 }
 
 
@@ -127,6 +156,75 @@ def load_analyzer_data(cache_dir):
         'noise_levels': noise_levels,
         'waveform_quality': waveform_quality,
     }
+
+
+def get_ks4_good_unit_ids(sort_dir, bank_id):
+    """Return unit IDs that KiloSort4 labelled as 'good'."""
+    ks_label_path = sort_dir / f'bank{bank_id:02d}_ks4' / 'sorter_output' / 'cluster_KSLabel.tsv'
+    if not ks_label_path.exists():
+        logger.warning("  No cluster_KSLabel.tsv for bank %d", bank_id)
+        return []
+    df = pd.read_csv(ks_label_path, sep='\t')
+    return df.loc[df['KSLabel'] == 'good', 'cluster_id'].tolist()
+
+
+def get_classifier_good_unit_ids(sort_dir, bank_id, require_sua=False,
+                                   p_neural_thresh=0.4,
+                                   min_snr=2.0, min_fr=0.3, max_isi=0.6,
+                                   prefer_custom=True,
+                                   custom_p_thresh=0.5):
+    """Return unit IDs that pass the classifier filter.
+
+    If ``prefer_custom`` and the locally-trained classifier output exists at
+    ``labels_custom.csv``, use it directly with ``custom_p_thresh`` and skip
+    baseline filters (the trained model already encodes those judgments).
+
+    Otherwise fall back to UnitRefine + baseline filters:
+      - P(neural) >= p_neural_thresh (default 0.4 — permissive)
+      - quality_metrics.snr >= min_snr
+      - quality_metrics.firing_rate >= min_fr
+      - quality_metrics.isi_violations_ratio <= max_isi
+      - optional: sua_mua_label == 'sua'
+
+    Falls back to KS4 'good' labels if no classifier output is available.
+    """
+    cache_dir = sort_dir / f'bank{bank_id:02d}_ks4' / 'analyzer_cache'
+    custom_path = cache_dir / 'extensions' / 'auto_curation' / 'labels_custom.csv'
+    if prefer_custom and custom_path.exists():
+        df = pd.read_csv(custom_path)
+        mask = df['custom_p_neural'] >= custom_p_thresh
+        return df.loc[mask, 'unit_id'].tolist()
+
+    labels_path = cache_dir / 'extensions' / 'auto_curation' / 'labels.csv'
+    if not labels_path.exists():
+        logger.warning("  No classifier labels for bank %d, falling back to KS4",
+                       bank_id)
+        return get_ks4_good_unit_ids(sort_dir, bank_id)
+    df = pd.read_csv(labels_path)
+
+    # Compute P(neural) — convert from "max class prob"
+    df['p_neural'] = df.apply(
+        lambda r: r['noise_neural_prob'] if r['noise_neural_label'] == 'neural'
+        else 1 - r['noise_neural_prob'], axis=1)
+    mask = df['p_neural'] >= p_neural_thresh
+
+    # Add baseline quality filter
+    qm_path = cache_dir / 'extensions' / 'quality_metrics' / 'metrics.csv'
+    if qm_path.exists():
+        qm = pd.read_csv(qm_path, index_col=0)
+        # Map unit_id to qm rows
+        snr_map = qm['snr'].to_dict()
+        fr_map = qm['firing_rate'].to_dict()
+        isi_map = qm['isi_violations_ratio'].to_dict()
+        df['snr'] = df['unit_id'].map(snr_map)
+        df['fr'] = df['unit_id'].map(fr_map)
+        df['isi'] = df['unit_id'].map(isi_map)
+        mask = mask & (df['snr'] >= min_snr) & (df['fr'] >= min_fr) & (df['isi'] <= max_isi)
+
+    if require_sua and 'sua_mua_label' in df.columns:
+        mask = mask & (df['sua_mua_label'] == 'sua')
+
+    return df.loc[mask, 'unit_id'].tolist()
 
 
 def get_good_unit_ids(qm, tm=None, templates=None, noise_levels=None,
@@ -261,10 +359,7 @@ def prepare_um_session(date_key, bank_id, um_input_dir):
 
     # Load data directly from files
     data = load_analyzer_data(cache_dir)
-    good_ids = get_good_unit_ids(data['qm'], tm=data['tm'],
-                                 templates=data['templates'],
-                                 noise_levels=data['noise_levels'],
-                                 waveform_quality=data['waveform_quality'])
+    good_ids = get_classifier_good_unit_ids(sort_dir, bank_id)
     if len(good_ids) == 0:
         logger.info("  %s bank %d: 0 good units, skipping", date_key, bank_id)
         return None
@@ -480,7 +575,7 @@ def plot_tracking_summary(all_matches_df, all_um_results, date_keys, fig_dir):
     # Panel A: Matches per bank
     ax = axes[0]
     bank_counts = all_matches_df.groupby('bank').size()
-    banks = range(12)
+    banks = range(7)
     counts = [bank_counts.get(b, 0) for b in banks]
     ax.barh(list(banks), counts, color='#4472C4', alpha=0.8)
     ax.set_yticks(list(banks))
@@ -517,6 +612,7 @@ def plot_tracking_summary(all_matches_df, all_um_results, date_keys, fig_dir):
     fig.tight_layout()
     out_path = fig_dir / 'tracking_summary.png'
     fig.savefig(out_path, dpi=200, bbox_inches='tight')
+    fig.savefig(out_path.with_suffix('.svg'), bbox_inches='tight')
     plt.close(fig)
     logger.info("Saved: %s", out_path)
 
@@ -554,6 +650,7 @@ def plot_tracking_summary(all_matches_df, all_um_results, date_keys, fig_dir):
     fig.tight_layout()
     out_path = fig_dir / 'tracking_full_probe.png'
     fig.savefig(out_path, dpi=200, bbox_inches='tight')
+    fig.savefig(out_path.with_suffix('.svg'), bbox_inches='tight')
     plt.close(fig)
     logger.info("Saved: %s", out_path)
 
@@ -740,6 +837,7 @@ def plot_matched_unit_diagnostics(all_matches_df, date_keys, fig_dir,
         fig.tight_layout(pad=0.3, h_pad=0.5, w_pad=0.3)
         out = fig_dir / f'matched_waveforms_p{page:02d}.png'
         fig.savefig(out, dpi=200, bbox_inches='tight')
+        fig.savefig(out.with_suffix('.svg'), bbox_inches='tight')
         plt.close(fig)
         logger.info("Saved: %s", out)
         page += 1
@@ -756,7 +854,7 @@ def plot_matched_unit_diagnostics(all_matches_df, date_keys, fig_dir,
                'amplitude_median': [], 'presence_ratio': [], 'depth': []}
 
     for dk in date_keys:
-        for bank_id in range(12):
+        for bank_id in range(7):
             data = _get_data(dk, bank_id)
             if data is None:
                 continue
@@ -839,6 +937,7 @@ def plot_matched_unit_diagnostics(all_matches_df, date_keys, fig_dir,
     fig.tight_layout()
     out = fig_dir / 'matched_quality_metrics.png'
     fig.savefig(out, dpi=200, bbox_inches='tight')
+    fig.savefig(out.with_suffix('.svg'), bbox_inches='tight')
     plt.close(fig)
     logger.info("Saved: %s", out)
 
@@ -876,6 +975,7 @@ def plot_matched_unit_diagnostics(all_matches_df, date_keys, fig_dir,
     fig.tight_layout()
     out = fig_dir / 'depth_stability.png'
     fig.savefig(out, dpi=200, bbox_inches='tight')
+    fig.savefig(out.with_suffix('.svg'), bbox_inches='tight')
     plt.close(fig)
     logger.info("Saved: %s", out)
 
@@ -955,72 +1055,79 @@ def plot_trackability_curve(all_um_results, date_keys, fig_dir):
         logger.info("  ≥%2d days:  %4d neurons  (%.1f%% of all, %.1f%% of tracked)",
                      d, n, 100 * p_all, 100 * p_tr)
 
-    # ---- Figure ----
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-    fig.suptitle('Neuron Trackability Across Recording Intervals',
-                 fontsize=14, fontweight='bold')
-
-    # Panel A: Survival curve — proportion trackable vs interval
-    ax = axes[0]
-    ax.step(intervals, prop_of_all * 100, where='mid',
-            color='#4472C4', linewidth=2.5, label='% of all neurons')
-    ax.step(intervals, prop_of_tracked * 100, where='mid',
-            color='#ED7D31', linewidth=2.5, linestyle='--',
-            label='% of tracked neurons')
-    for d, p in zip(intervals, prop_of_all):
-        n = int(np.sum(max_spans >= d))
-        ax.annotate(f'{n}', (d, p * 100),
-                    fontsize=8, ha='center', va='bottom',
-                    xytext=(0, 6), textcoords='offset points',
-                    color='#4472C4')
-    ax.set_xlabel('Minimum Interval (days)')
-    ax.set_ylabel('Proportion of Neurons (%)')
-    ax.set_title('Trackability Survival Curve')
-    ax.set_xlim(0.5, max_possible + 0.5)
-    ax.set_ylim(0, max(prop_of_tracked.max() * 100 * 1.2, 50))
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3)
-
-    # Panel B: Histogram of max spans (tracked neurons only)
-    ax = axes[1]
+    # ---- Figure: single clean survival curve ----
     tracked_spans = max_spans[max_spans > 0]
-    if len(tracked_spans) > 0:
-        bins = np.arange(0.5, max_possible + 1.5, 1)
-        ax.hist(tracked_spans, bins=bins, color='#70AD47', alpha=0.8,
-                edgecolor='k', linewidth=0.5)
-        ax.set_xlabel('Max Tracking Span (days)')
-        ax.set_ylabel('Number of Neurons')
-        ax.set_title(f'Distribution of Max Tracking Span\n'
-                     f'(n={len(tracked_spans)} tracked neurons, '
-                     f'median={np.median(tracked_spans):.0f} days)')
-        ax.axvline(np.median(tracked_spans), color='red', linewidth=1.5,
-                   linestyle='--', label=f'Median = {np.median(tracked_spans):.0f} d')
-        ax.legend(fontsize=9)
+    n_tracked = len(tracked_spans)
+    median_span = float(np.median(tracked_spans)) if n_tracked else 0
+    q75_span = float(np.percentile(tracked_spans, 75)) if n_tracked else 0
+    q90_span = float(np.percentile(tracked_spans, 90)) if n_tracked else 0
 
-    # Panel C: Per-bank breakdown
-    ax = axes[2]
-    bank_ids = sorted(per_bank_counts.keys())
-    n_totals = [per_bank_counts[b][0] for b in bank_ids]
-    n_trackeds = [per_bank_counts[b][1] for b in bank_ids]
-    y_pos = np.arange(len(bank_ids))
-    ax.barh(y_pos, n_totals, color='#4472C4', alpha=0.3,
-            edgecolor='k', linewidth=0.3, label='All neurons')
-    ax.barh(y_pos, n_trackeds, color='#ED7D31', alpha=0.8,
-            edgecolor='k', linewidth=0.5, label='Tracked (≥2 sessions)')
-    ax.set_yticks(y_pos)
-    ax.set_yticklabels([f'Bank {b}' for b in bank_ids])
-    ax.set_xlabel('Number of Unique Neurons')
-    ax.set_title('Tracked vs Total per Bank')
-    ax.invert_yaxis()
-    for i, (nt, ntr) in enumerate(zip(n_totals, n_trackeds)):
-        pct = 100 * ntr / nt if nt > 0 else 0
-        ax.text(nt + 1, i, f'{ntr}/{nt} ({pct:.0f}%)',
-                va='center', fontsize=7)
-    ax.legend(fontsize=9, loc='lower right')
+    counts = np.array([int(np.sum(max_spans >= d)) for d in intervals])
+
+    fig, ax = plt.subplots(figsize=(10.5, 5.8))
+
+    # Filled survival curve
+    ax.fill_between(intervals, counts, step='post',
+                     color='#4472C4', alpha=0.18, linewidth=0)
+    ax.step(intervals, counts, where='post', color='#1F3864',
+             linewidth=2.2)
+
+    # Percentile markers with explicit count + % of total annotation
+    for span, label, color in [
+        (median_span, 'median', '#ED7D31'),
+        (q75_span, '75th %ile', '#70AD47'),
+        (q90_span, '90th %ile', '#7F7F7F'),
+    ]:
+        if span <= 0:
+            continue
+        n_here = int(np.sum(max_spans >= span))
+        pct_here = 100 * n_here / total_neurons
+        ax.axvline(span, color=color, linestyle='--', lw=1.2, alpha=0.85)
+        ax.annotate(
+            f'{label}: {span:.0f} d\nn = {n_here}  ({pct_here:.1f}%)',
+            xy=(span, n_here),
+            xytext=(span + max_possible * 0.012, n_here),
+            fontsize=9, color=color, va='center', ha='left',
+            fontweight='bold')
+
+    # Annotate the cliff at day 1 with count
+    ax.annotate(
+        f'n = {n_tracked}\n({100 * n_tracked / total_neurons:.1f}% of good units)',
+        xy=(1, n_tracked), xytext=(max_possible * 0.02, n_tracked * 0.96),
+        fontsize=9, color='#1F3864', va='top', ha='left',
+        fontweight='bold')
+
+    ax.set_xlabel('Tracking span ≥ X days', fontsize=11)
+    ax.set_ylabel('Number of neurons', fontsize=11)
+    ax.set_xlim(0, max_possible + 1)
+    ax.set_ylim(0, n_tracked * 1.12)
+    ax.grid(True, alpha=0.25)
+    ax.spines['top'].set_visible(False)
+
+    # Secondary axis showing percent of total good units
+    ax2 = ax.twinx()
+    ax2.set_ylim(0, n_tracked * 1.12 / total_neurons * 100)
+    ax2.set_ylabel('% of all good units '
+                   f'(N = {total_neurons})', fontsize=11)
+    ax2.spines['top'].set_visible(False)
+
+    title = (f'Neuron trackability — {n_tracked} of {total_neurons} '
+             f'good units appear in ≥2 sessions '
+             f'({100 * n_tracked / total_neurons:.1f}%)')
+    subtitle = (f'median span {median_span:.0f} d  ·  '
+                f'75th %ile {q75_span:.0f} d  ·  '
+                f'90th %ile {q90_span:.0f} d  ·  '
+                f'max {max_possible} d')
+    ax.set_title(title, fontsize=12, fontweight='bold', loc='left',
+                  pad=20)
+    ax.text(0.0, 1.025, subtitle, transform=ax.transAxes,
+             fontsize=9.5, color='#555555')
 
     fig.tight_layout()
     out = fig_dir / 'trackability_curve.png'
-    fig.savefig(out, dpi=200, bbox_inches='tight')
+    fig.savefig(out, dpi=200, bbox_inches='tight', facecolor='white')
+    fig.savefig(out.with_suffix('.svg'), bbox_inches='tight',
+                 facecolor='white')
     plt.close(fig)
     logger.info("Saved: %s", out)
 
@@ -1098,6 +1205,7 @@ def plot_similarity_scores(all_um_results, date_keys, fig_dir):
     fig.tight_layout()
     out = fig_dir / 'similarity_scores.png'
     fig.savefig(out, dpi=200, bbox_inches='tight')
+    fig.savefig(out.with_suffix('.svg'), bbox_inches='tight')
     plt.close(fig)
     logger.info("Saved: %s", out)
 
@@ -1128,7 +1236,7 @@ def main():
     all_matches = []
     all_um_results = {}
 
-    for bank_id in range(12):
+    for bank_id in range(7):
         logger.info("\n" + "=" * 70)
         logger.info("BANK %d", bank_id)
         logger.info("=" * 70)

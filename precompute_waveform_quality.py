@@ -48,8 +48,8 @@ logger = logging.getLogger(__name__)
 DATA_ROOT = Path(os.environ.get('DATA_ROOT', 'E:/'))
 SORT_ROOT = DATA_ROOT / 'sorting_output'
 
-SURVEYS = ['20260226', '20260302', '20260304', '20260306', '20260309', '20260311', '20260313', '20260316']
-N_BANKS = 12
+SURVEYS = ['20260226', '20260302', '20260304', '20260306', '20260309', '20260311', '20260313', '20260316', '20260319', '20260323', '20260326', '20260331', '20260402', '20260407', '20260409', '20260414', '20260417', '20260421', '20260424', '20260428', '20260501', '20260507', '20260512', '20260522', '20260526', '20260604', '20260611', '20260618', '20260625', '20260723', '20260730']
+N_BANKS = 7
 
 
 def compute_flag(df):
@@ -229,10 +229,19 @@ def process_survey(survey_key):
             continue
 
         try:
+            out_dir = cache_dir / 'extensions' / 'waveform_quality'
+            if (out_dir / 'metrics.csv').exists():
+                df = pd.read_csv(out_dir / 'metrics.csv', index_col=0)
+                bank_flagged = int(df['boundary_noise_flag'].sum())
+                n_saved += 1
+                n_flagged += bank_flagged
+                n_units += len(df)
+                logger.info("  Bank %d: %d units (cached)", bank_id, len(df))
+                continue
+
             df = compute_bank_metrics(cache_dir)
 
             # Save
-            out_dir = cache_dir / 'extensions' / 'waveform_quality'
             out_dir.mkdir(parents=True, exist_ok=True)
             df.to_csv(out_dir / 'metrics.csv')
 

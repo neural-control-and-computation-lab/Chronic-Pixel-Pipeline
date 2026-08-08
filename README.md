@@ -177,6 +177,12 @@ conda activate cpp
 
 ### Running
 
+All scripts resolve their paths from `DATA_ROOT`, which holds both the raw
+SpikeGLX survey folders and every generated output (`sorting_output/`,
+`figures/`, `logs/`, `classifier_model/`, `labeling_pool/`). Nothing is written
+through Dropbox or another sync client except the explicit figure sync in
+step 6.
+
 ```bash
 # Set DATA_ROOT to the directory containing SpikeGLX survey folders
 export DATA_ROOT=/path/to/data   # Linux/macOS
@@ -185,8 +191,10 @@ set DATA_ROOT=E:\                # Windows
 # Run individual pipeline steps
 python sort_survey.py all                  # 1. Sort all surveys
 python precompute_waveform_quality.py      # 2. Compute quality metrics
-python run_single_neuron_plots.py          # 3. Generate unit figures
-python track_neurons.py                    # 4. Track neurons across days
+python apply_custom_classifier.py all      # 3. Label units neural vs noise
+python run_single_neuron_plots.py          # 4. Generate unit figures
+python track_neurons.py                    # 5. Track neurons across days
+python regen_tracking_plots.py             # 6. Aggregate figures + Dropbox sync
 
 # Or run the full pipeline at once
 run_all.bat          # Windows
@@ -208,8 +216,36 @@ python sort_survey.py 20260226 --force
 |------|--------|---------|
 | 1 | `sort_survey.py` | Parse survey timetable, preprocess, sort each bank with KS4, merge results |
 | 2 | `precompute_waveform_quality.py` | Compute waveform quality metrics and boundary-noise classification |
-| 3 | `run_single_neuron_plots.py` | Generate per-unit summary figures (good vs suspect) |
-| 4 | `track_neurons.py` | Cross-day neuron tracking with UnitMatch |
+| 3 | `apply_custom_classifier.py` | Label every unit neural vs noise with the locally-trained classifier |
+| 4 | `run_single_neuron_plots.py` | Generate per-unit summary figures |
+| 5 | `track_neurons.py` | Cross-day neuron tracking with UnitMatch |
+| 6 | `regen_tracking_plots.py` | Rebuild cross-survey aggregate figures, then sync to Dropbox |
+
+Steps 2 and 3 only process banks 0–6; the upper banks sit above the tissue and
+are almost entirely boundary noise.
+
+Step 6 is easy to forget and matters: `track_neurons.py` writes only the
+per-run tracking figures. The cross-survey aggregates
+(`drift_scatter_per_survey`, `good_units_over_time`, `trackability_curve`) are
+rebuilt from the saved `tracking_summary.csv` by `regen_tracking_plots.py`,
+which then calls `figure_sync.py`. Skipping it leaves both the aggregates and
+the Dropbox mirror one survey behind.
+
+### Adding a new survey
+
+Register the date key in **four** places, then run the six steps above for that
+key:
+
+| File | Constant |
+|------|----------|
+| `sort_survey.py` | `SURVEYS` (and the default key at the bottom of `main()`) |
+| `precompute_waveform_quality.py` | `SURVEYS` |
+| `run_single_neuron_plots.py` | `SURVEYS` |
+| `track_neurons.py` | `SURVEY_DIRS` |
+
+`drift_scatter_per_survey.py` and `regen_tracking_plots.py` import the list from
+`track_neurons.py`, so they need no edit. A survey registered in only some of
+the four lists will silently drop out of the steps it is missing from.
 
 ### Sorting Details (`sort_survey.py`)
 
@@ -232,18 +268,56 @@ Classifies units as real neurons vs boundary noise using six criteria with tiere
 - **C5**: Low SNR + moderate instability (small units only)
 - **C6**: Very small footprint + unstable amplitude
 
+### Unit Classification (`apply_custom_classifier.py`)
+
+Applies a locally-trained gradient-boosted classifier
+(`DATA_ROOT/classifier_model/`) to every unit in banks 0–6, writing
+
+```
+<sort_dir>/bank<bb>_ks4/analyzer_cache/extensions/auto_curation/labels_custom.csv
+<sort_dir>/auto_curation_labels_custom.csv
+```
+
+with columns `unit_id, custom_label, custom_p_neural, ks4_label`. Downstream
+steps prefer these labels over the raw KS4 ones — `track_neurons.py` matches on
+them, and `run_single_neuron_plots.py` draws one figure per neural-labelled
+unit. Typical yield on this preparation is ~13% of units labelled neural.
+
+The model itself is built by the labelling chain, which only needs re-running
+when you want to retrain:
+
+| Script | Purpose |
+|--------|---------|
+| `build_labeling_pool.py` | Sample units stratified by classifier probability into `DATA_ROOT/labeling_pool/` |
+| `label_units_web.py` | Browser labeller — serves one unit at a time, records to `labels.csv` |
+| `train_classifier.py` | Train on the hand labels, write `classifier.joblib` + `feature_order.json` |
+| `auto_classify_units.py` | Feature extraction shared by training and inference |
+
 ### Unit Figures (`run_single_neuron_plots.py`)
 
-Generates 5-panel summary figures for each unit that passes the baseline quality gate:
+Generates 5-panel summary figures for each unit that passes the quality gate:
 - Probe location map
 - Multi-channel template waveforms
 - Peak-channel mean waveform ± SD
 - Autocorrelogram
 - Spike amplitudes over time
 
-Units are classified into two tiers:
-- **`units/`** — pass both baseline and strict (waveform quality) criteria
-- **`units_suspect/`** — pass baseline but flagged by waveform quality
+### Figure Sync (`figure_sync.py`)
+
+Mirrors `DATA_ROOT/figures/sorting/<subdir>/` to a shared Dropbox tree so
+results reach collaborators. The destination defaults to the lab's folder and
+can be overridden with the `DROPBOX_FIG_ROOT` env var.
+
+```bash
+python figure_sync.py tracking drift_concat
+
+# per-survey sets need recursion to carry the units/ subfolder
+python -c "from figure_sync import sync_to_dropbox; \
+    sync_to_dropbox('survey_20260730', recursive=True)"
+```
+
+`regen_tracking_plots.py` and `drift_concat.py` call it automatically;
+`track_neurons.py` does not.
 
 ### Output
 
@@ -312,12 +386,40 @@ src/chronic_pixel_pipeline/
         timescan.py          # CLI: cpp-scan
         sort.py              # CLI: cpp-sort
 
+# Survey pipeline (run in this order)
 sort_survey.py               # Step 1: Survey-mode sorting (KS4 per bank)
 precompute_waveform_quality.py  # Step 2: Waveform quality metrics & classification
-run_single_neuron_plots.py   # Step 3: Per-unit summary figures
-track_neurons.py             # Step 4: Cross-day neuron tracking (UnitMatch)
+apply_custom_classifier.py   # Step 3: Neural vs noise labels
+run_single_neuron_plots.py   # Step 4: Per-unit summary figures
+track_neurons.py             # Step 5: Cross-day neuron tracking (UnitMatch)
+regen_tracking_plots.py      # Step 6: Aggregate figures + Dropbox sync
+
+# Supporting tools
+auto_classify_units.py       # Feature extraction for the classifier
+build_labeling_pool.py       # Sample units for hand labelling
+label_units_web.py           # Browser labeller
+train_classifier.py          # Train the neural/noise model
+drift_scatter_per_survey.py  # Per-survey drift raster (called by step 6)
+drift_concat.py              # Chronic drift estimation across sessions
+figure_sync.py               # Mirror figures to the shared Dropbox tree
+
+# Wireless (SpikeGadgets) analyses
+sort_wireless.py             # Sort multi-segment wireless .dat recordings
+mega_sort.py                 # Unified sort across all banks and sessions
+analyze_neural_imu.py        # Neural/IMU correlation
+decode_neural_imu.py         # Decode IMU from neural populations
+
+# Publication figures
+select_tracked_pairs.py      # Rank tracked pairs for example figures
+pair_supp_data.py            # Dump a pair's data to a portable .npz
+pair_panels.py               # Shared panel renderers
+make_pair_composite.py       # Tracked-pair composite figure
+make_minimal_pair_plots.py   # Minimal tracked-pair waveform plots
+make_minimal_unit_plots.py   # Minimal single-unit waveform plots
+
 setup_env.sh / .bat          # Environment setup (conda + CUDA)
 run_all.sh / .bat            # Full pipeline orchestration
+scratch/                     # One-off analyses (gitignored)
 ```
 
 ## API Reference

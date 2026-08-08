@@ -1,11 +1,9 @@
 """
 Generate individual unit summary figures for all surveys.
 
-For each survey, units are classified into two tiers:
-  - **good** (units/): pass both the baseline quality gate (SNR, firing rate,
-    ISI) and the strict waveform quality filter (boundary_noise_flag=False).
-  - **suspect** (units_suspect/): pass baseline but are flagged by the
-    waveform quality classifier.
+One figure per unit labelled 'neural' by the custom classifier
+(labels_custom.csv, written by apply_custom_classifier.py), for banks 0-6.
+All figures go to figures/sorting/survey_<key>/units/.
 
 Each figure is a 5-panel layout:
   1. Probe location map (electrode positions, peak channel highlighted)
@@ -50,15 +48,16 @@ import spikeinterface.full as si
 # ── Add repo root to path so we can import from track_neurons ──
 REPO = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO))
-from track_neurons import load_analyzer_data, get_good_unit_ids
+from track_neurons import (load_analyzer_data, get_good_unit_ids,
+                            get_ks4_good_unit_ids, get_classifier_good_unit_ids)
 
 # ── Config ────────────────────────────────────────────────────────────
 DATA_ROOT = Path(os.environ.get('DATA_ROOT', 'E:/'))
 SORT_ROOT = DATA_ROOT / 'sorting_output'
 FIG_ROOT = DATA_ROOT / 'figures' / 'sorting'
 
-SURVEYS = ['20260226', '20260302', '20260304', '20260306', '20260309', '20260311', '20260313', '20260316']
-N_BANKS = 12
+SURVEYS = ['20260226', '20260302', '20260304', '20260306', '20260309', '20260311', '20260313', '20260316', '20260319', '20260323', '20260326', '20260331', '20260402', '20260407', '20260409', '20260414', '20260417', '20260421', '20260424', '20260428', '20260501', '20260507', '20260512', '20260522', '20260526', '20260604', '20260611', '20260618', '20260625', '20260723', '20260730']
+N_BANKS = 7
 
 
 # ── Custom unit summary ────────────────────────────────────────────────
@@ -204,23 +203,19 @@ def plot_custom_unit_summary(analyzer, uid, fig):
 def run_survey(survey_key):
     """Generate single-neuron plots for one survey.
 
-    Good units go to units/, suspect units (boundary noise flagged) go to
-    units_suspect/ with red title showing the 3 waveform quality metrics.
+    Uses the custom classifier's 'neural' label (labels_custom.csv, written by
+    apply_custom_classifier.py) — one figure per neural unit, all in units/.
     """
     sort_dir = SORT_ROOT / f'survey_{survey_key}'
     fig_dir_good = FIG_ROOT / f'survey_{survey_key}' / 'units'
-    fig_dir_suspect = FIG_ROOT / f'survey_{survey_key}' / 'units_suspect'
     fig_dir_good.mkdir(parents=True, exist_ok=True)
-    fig_dir_suspect.mkdir(parents=True, exist_ok=True)
 
     logger.info("=" * 60)
     logger.info("SURVEY %s", survey_key)
-    logger.info("  good    -> %s", fig_dir_good)
-    logger.info("  suspect -> %s", fig_dir_suspect)
+    logger.info("  units -> %s", fig_dir_good)
     logger.info("=" * 60)
 
     total_good_saved = 0
-    total_suspect_saved = 0
     global_unit_idx = 0
 
     for bank_id in range(N_BANKS):
@@ -247,40 +242,18 @@ def run_survey(survey_key):
             logger.info("  Bank %d: 0 units, skipping", bank_id)
             continue
 
-        # Load data for good-unit classification (same as track_neurons)
+        # Use the custom classifier's neural/noise labels
         data = load_analyzer_data(cache_dir)
+        good_ids = set(get_classifier_good_unit_ids(sort_dir, bank_id))
 
-        # Good IDs WITHOUT waveform quality filtering (baseline set)
-        baseline_ids = get_good_unit_ids(
-            data['qm'], tm=data['tm'],
-            templates=data['templates'],
-            noise_levels=data['noise_levels'],
-        )
-        # Good IDs WITH waveform quality filtering (strict set)
-        strict_ids = get_good_unit_ids(
-            data['qm'], tm=data['tm'],
-            templates=data['templates'],
-            noise_levels=data['noise_levels'],
-            waveform_quality=data.get('waveform_quality'),
-        )
-
-        good_set = set(strict_ids)
-        suspect_set = set(baseline_ids) - good_set
-        plottable_set = set(baseline_ids)  # union of good + suspect
-
-        # Get metrics for figure titles
         qm = data['qm']
         templates_arr = data['templates']
-        wq = data.get('waveform_quality')
 
         bank_good = 0
-        bank_suspect = 0
         for uid_idx, uid in enumerate(sorting.unit_ids):
-            if uid not in plottable_set:
+            if uid not in good_ids:
                 global_unit_idx += 1
                 continue
-
-            is_suspect = uid in suspect_set
 
             # Unit metadata for title
             template = templates_arr[uid_idx]
@@ -299,38 +272,22 @@ def run_survey(survey_key):
             if data['noise_levels'] is not None:
                 noise_str = f"  |  Noise={data['noise_levels'][peak_ch]:.1f}uV"
 
-            # Waveform quality metrics for suspect title
-            wq_str = ''
-            if is_suspect and wq is not None and uid in wq.index:
-                row = wq.loc[uid]
-                wq_str = (f"\nn_spat={n_spat}  |  "
-                          f"snr_pw={row.get('max_pointwise_snr', 0):.2f}  |  "
-                          f"amp_cv={row.get('amp_cv', 0):.3f}  |  "
-                          f"acg_refr={row.get('acg_refr_ratio', 0):.3f}")
-
             try:
                 fig = plt.figure(figsize=(16, 9))
                 plot_custom_unit_summary(analyzer, uid, fig)
 
-                title_color = 'red' if is_suspect else 'black'
-                label = 'SUSPECT' if is_suspect else 'Unit'
                 fig.suptitle(
-                    f"{label} {global_unit_idx}  |  Bank {bank_id}  |  "
+                    f"Unit {global_unit_idx}  |  Bank {bank_id}  |  "
                     f"{depth / 1000:.1f} mm  |  "
                     f"Amp={peak_ptp:.0f} uV  |  FR={fr:.1f} Hz  |  "
-                    f"SNR={snr_val:.1f}{noise_str}{wq_str}",
-                    fontsize=13, fontweight='bold', y=1.02,
-                    color=title_color)
+                    f"SNR={snr_val:.1f}{noise_str}",
+                    fontsize=13, fontweight='bold', y=1.02)
 
                 fname = f'unit_{global_unit_idx:04d}_bank{bank_id:02d}.png'
-                out_dir = fig_dir_suspect if is_suspect else fig_dir_good
-                fig.savefig(out_dir / fname, dpi=150, bbox_inches='tight',
+                fig.savefig(fig_dir_good / fname, dpi=150, bbox_inches='tight',
                             facecolor='white')
                 plt.close(fig)
-                if is_suspect:
-                    bank_suspect += 1
-                else:
-                    bank_good += 1
+                bank_good += 1
             except Exception as e:
                 logger.warning("  Failed to plot unit %d (uid %s): %s",
                                global_unit_idx, uid, e)
@@ -338,15 +295,11 @@ def run_survey(survey_key):
 
             global_unit_idx += 1
 
-        logger.info("  Bank %d: %d good, %d suspect figures saved",
-                     bank_id, bank_good, bank_suspect)
+        logger.info("  Bank %d: %d figures saved", bank_id, bank_good)
         total_good_saved += bank_good
-        total_suspect_saved += bank_suspect
 
-    logger.info("Survey %s: %d good + %d suspect = %d total figures",
-                 survey_key, total_good_saved, total_suspect_saved,
-                 total_good_saved + total_suspect_saved)
-    return total_good_saved, total_suspect_saved
+    logger.info("Survey %s: %d figures", survey_key, total_good_saved)
+    return total_good_saved, 0
 
 
 def main():

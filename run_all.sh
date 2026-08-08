@@ -1,21 +1,25 @@
 #!/bin/bash
-# Run the full pipeline: sort, compute quality metrics, generate figures, track neurons.
+# Run the full survey pipeline, end to end.
 #
 # Usage:
-#   bash run_all.sh                    # full pipeline (sort + metrics + figures + track)
-#   bash run_all.sh sort               # sort only
-#   bash run_all.sh metrics            # precompute waveform quality only
-#   bash run_all.sh figures            # generate unit figures only
-#   bash run_all.sh track              # track only (assumes sorting done)
+#   bash run_all.sh                    # full pipeline (all six steps)
+#   bash run_all.sh sort               # 1. sort only
+#   bash run_all.sh metrics            # 2. precompute waveform quality only
+#   bash run_all.sh classify           # 3. apply the neural/noise classifier only
+#   bash run_all.sh figures            # 4. generate unit figures only
+#   bash run_all.sh track              # 5. track only (assumes sorting done)
+#   bash run_all.sh aggregate          # 6. aggregate figures + Dropbox sync only
 #
 # Prerequisites:
 #   1. Run setup_env.sh first to create the conda environment
 #   2. Set DATA_ROOT to your SpikeGLX data directory:
 #        export DATA_ROOT=~/data/TRODES_test
 #   3. Survey directories should exist in DATA_ROOT
+#   4. Step 3 needs a trained model in DATA_ROOT/classifier_model/
+#      (see train_classifier.py)
 #
-# All outputs (sorting_output, figures, logs) are written inside DATA_ROOT
-# so nothing goes through Dropbox or other cloud sync.
+# All outputs (sorting_output, figures, logs) are written inside DATA_ROOT.
+# The only thing that leaves DATA_ROOT is the explicit figure sync in step 6.
 
 set -e
 
@@ -50,10 +54,18 @@ if [ "$MODE" = "metrics" ] || [ "$MODE" = "all" ]; then
     python precompute_waveform_quality.py 2>&1 | tee "${LOG_DIR}/precompute_quality.log"
 fi
 
+if [ "$MODE" = "classify" ] || [ "$MODE" = "all" ]; then
+    echo ""
+    echo "=================================================="
+    echo "Step 3: Apply the neural/noise classifier"
+    echo "=================================================="
+    python apply_custom_classifier.py all 2>&1 | tee "${LOG_DIR}/apply_classifier.log"
+fi
+
 if [ "$MODE" = "figures" ] || [ "$MODE" = "all" ]; then
     echo ""
     echo "=================================================="
-    echo "Step 3: Generate single-neuron figures"
+    echo "Step 4: Generate single-neuron figures"
     echo "=================================================="
     python run_single_neuron_plots.py 2>&1 | tee "${LOG_DIR}/single_neuron_plots.log"
 fi
@@ -61,9 +73,17 @@ fi
 if [ "$MODE" = "track" ] || [ "$MODE" = "all" ]; then
     echo ""
     echo "=================================================="
-    echo "Step 4: Cross-day neuron tracking with UnitMatch"
+    echo "Step 5: Cross-day neuron tracking with UnitMatch"
     echo "=================================================="
     python track_neurons.py 2>&1 | tee "${LOG_DIR}/track_neurons.log"
+fi
+
+if [ "$MODE" = "aggregate" ] || [ "$MODE" = "all" ]; then
+    echo ""
+    echo "=================================================="
+    echo "Step 6: Aggregate tracking figures + Dropbox sync"
+    echo "=================================================="
+    python regen_tracking_plots.py 2>&1 | tee "${LOG_DIR}/regen_tracking_plots.log"
 fi
 
 echo ""
