@@ -110,6 +110,7 @@ SURVEYS = {
     '20260813': 'SvyPrb_2026-08-13T14.08.28_g0',
     '20260820': 'SvyPrb_2026-08-20T15.03.05_g0',
     '20260826': 'SvyPrb_2026-08-26T13.01.32_g0',
+    '20260914': 'SvyPrb_2026-09-14T11.35.54_g0',
 }
 
 
@@ -881,7 +882,7 @@ def main():
                             force=force)
     else:
         # Default: latest survey
-        key = '20260826'
+        key = '20260914'
         sort_one_survey(key, _survey_dir(key), _output_dir(key),
                         fig_dir=_fig_dir(key), torch_device=torch_device,
                         bank_filter=bank_filter, force=force)
