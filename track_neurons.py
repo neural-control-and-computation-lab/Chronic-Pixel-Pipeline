@@ -94,6 +94,8 @@ SURVEY_DIRS = {
     '20260826': 'SvyPrb_2026-08-26T13.01.32_g0',
     '20260914': 'SvyPrb_2026-09-14T11.35.54_g0',
     '20260924': 'SvyPrb_2026-09-24T14.44.18_g0',
+    '20261001': 'SvyPrb_2026-10-01T14.21.07_g0',
+    '20261013': 'SvyPrb_2026-10-13T13.14.56_g0',
 }
 
 # Surveys excluded from cross-day tracking analyses (still sorted, just not
@@ -422,6 +424,11 @@ def run_unitmatch_bank(bank_id, session_dirs, um_input_dir):
     import UnitMatchPy.overlord as ov
     import UnitMatchPy.bayes_functions as bf
     import UnitMatchPy.assign_unique_id as aid
+
+    # Upstream's recentered-euclidean metric allocates O(n_units^2) temporaries
+    # and dies on bank 3 (~2,700 units). See unitmatch_patch.py.
+    import unitmatch_patch
+    unitmatch_patch.apply()
 
     logger.info("\nRunning UnitMatch for Bank %d across %d sessions...",
                 bank_id, len(session_dirs))
