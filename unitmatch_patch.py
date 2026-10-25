@@ -97,22 +97,118 @@ def get_recentered_euclidean_dist_chunked(avg_waveform_per_tp_flip,
     return out
 
 
-def apply():
-    """Monkey-patch UnitMatchPy in place. Idempotent and safe to call twice."""
+# UnitMatchPy versions this patch has been checked against. A different
+# version is not fatal — the self-check below is the real gate — but it is
+# worth a warning so an upgrade gets a second look.
+TESTED_VERSIONS = {'3.3.0'}
+
+_TARGET = 'get_recentered_euclidean_dist'
+
+
+class PatchError(RuntimeError):
+    """Raised when the patch cannot be applied safely.
+
+    Always fail loudly rather than silently leaving upstream in place: the
+    unpatched code dies on bank 3, and a swallowed failure there is what let
+    incomplete tracking results reach Dropbox in the first place.
+    """
+
+
+def _self_check(original):
+    """Confirm our implementation still matches the installed upstream.
+
+    Runs both on a small synthetic input (milliseconds) where upstream's
+    O(n^2) tiling is harmless. Catches the case where a future UnitMatchPy
+    keeps the function name but changes shape conventions or semantics, which
+    would otherwise make us silently return wrong distances.
+    """
+    n, spike_width, n_wave = 6, 12, 4
+    rng = np.random.default_rng(20261025)
+    waveidx = np.arange(n_wave)
+    param = {'waveidx': waveidx, 'n_units': n, 'spike_width': spike_width}
+    awf = rng.normal(size=(3, n, spike_width, 2, 2))
+    cen = rng.normal(size=(3, n, 2))
+    # Exercise the NaN-mask path too.
+    awf[0, 1, waveidx[0], 0, 0] = np.nan
+
+    try:
+        ref = original(awf.copy(), cen.copy(), param)
+    except Exception as exc:
+        raise PatchError(
+            f"upstream {_TARGET} could not be evaluated on the reference "
+            f"input, so its calling convention has probably changed: {exc!r}. "
+            "Review unitmatch_patch.py against the installed UnitMatchPy "
+            "before running tracking."
+        ) from exc
+
+    new = get_recentered_euclidean_dist_chunked(awf.copy(), cen.copy(), param)
+
+    if ref.shape != new.shape:
+        raise PatchError(
+            f"shape mismatch vs upstream: {new.shape} != {ref.shape}")
+    if not np.array_equal(np.isnan(ref), np.isnan(new)):
+        raise PatchError("NaN placement differs from upstream")
+    finite = ~np.isnan(ref)
+    if finite.any() and not np.allclose(ref[finite], new[finite],
+                                        rtol=0, atol=1e-12):
+        worst = np.abs(ref[finite] - new[finite]).max()
+        raise PatchError(
+            f"values differ from upstream (max abs diff {worst:.3e})")
+
+
+def apply(verify=True):
+    """Monkey-patch UnitMatchPy in place. Idempotent and safe to call twice.
+
+    Raises PatchError if the patch cannot be applied safely — if the upstream
+    function has gone, or if our replacement no longer reproduces it.
+    """
     global _APPLIED
     if _APPLIED:
         return False
 
     import UnitMatchPy.metric_functions as mf
-    import UnitMatchPy.overlord as ov
+
+    try:
+        import importlib.metadata as _md
+        version = _md.version('UnitMatchPy')
+    except Exception:
+        version = 'unknown'
+    if version not in TESTED_VERSIONS:
+        logger.warning(
+            "UnitMatchPy %s has not been checked against this patch "
+            "(tested: %s); relying on the self-check.",
+            version, ', '.join(sorted(TESTED_VERSIONS)))
+
+    # A bare setattr would happily create a NEW attribute if upstream renamed
+    # or removed the function, leaving the real call path unpatched and the
+    # O(n^2) blowup live. Require the target to exist.
+    original = getattr(mf, _TARGET, None)
+    if original is None:
+        raise PatchError(
+            f"UnitMatchPy.metric_functions.{_TARGET} does not exist in "
+            f"version {version}. The memory fix would silently not apply; "
+            "update unitmatch_patch.py to target the new API.")
+    if getattr(original, '__module__', '').startswith('unitmatch_patch'):
+        _APPLIED = True
+        return False
+
+    if verify:
+        _self_check(original)
 
     mf.get_recentered_euclidean_dist = get_recentered_euclidean_dist_chunked
-    # overlord.py calls it via the module alias `mf`, but rebind defensively in
-    # case a future version imports the name directly.
-    if hasattr(ov, 'get_recentered_euclidean_dist'):
+
+    # overlord.py calls it via the module alias `mf`, so patching the module
+    # attribute is what matters; rebind a direct import too, if one appears.
+    import UnitMatchPy.overlord as ov
+    if hasattr(ov, _TARGET):
         ov.get_recentered_euclidean_dist = get_recentered_euclidean_dist_chunked
 
+    if mf.get_recentered_euclidean_dist is not \
+            get_recentered_euclidean_dist_chunked:
+        raise PatchError("patch did not take effect on "
+                         "UnitMatchPy.metric_functions")
+
     _APPLIED = True
-    logger.info("Applied chunked get_recentered_euclidean_dist patch "
-                "(block=%d)", BLOCK)
+    logger.info("Applied chunked %s patch (UnitMatchPy %s, block=%d, "
+                "verified=%s)", _TARGET, version, BLOCK, verify)
     return True
