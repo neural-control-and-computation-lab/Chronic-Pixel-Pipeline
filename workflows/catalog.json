@@ -1,0 +1,38 @@
+{
+  "acquisition": {
+    "sort_survey": "sort_survey.py",
+    "sort_wireless": "sort_wireless.py",
+    "mega_sort": "mega_sort.py"
+  },
+  "quality": {
+    "precompute_waveform_quality": "precompute_waveform_quality.py",
+    "auto_classify_units": "auto_classify_units.py",
+    "build_labeling_pool": "build_labeling_pool.py",
+    "label_units_web": "label_units_web.py",
+    "train_classifier": "train_classifier.py",
+    "apply_custom_classifier": "apply_custom_classifier.py"
+  },
+  "tracking": {
+    "track_neurons": "track_neurons.py",
+    "unitmatch_patch": "unitmatch_patch.py"
+  },
+  "analysis": {
+    "analyze_neural_imu": "analyze_neural_imu.py",
+    "decode_neural_imu": "decode_neural_imu.py"
+  },
+  "figures": {
+    "drift_concat": "drift_concat.py",
+    "drift_scatter_per_survey": "drift_scatter_per_survey.py",
+    "make_minimal_pair_plots": "make_minimal_pair_plots.py",
+    "make_minimal_unit_plots": "make_minimal_unit_plots.py",
+    "make_pair_composite": "make_pair_composite.py",
+    "pair_panels": "pair_panels.py",
+    "pair_supp_data": "pair_supp_data.py",
+    "regen_tracking_plots": "regen_tracking_plots.py",
+    "run_single_neuron_plots": "run_single_neuron_plots.py",
+    "select_tracked_pairs": "select_tracked_pairs.py"
+  },
+  "publishing": {
+    "figure_sync": "figure_sync.py"
+  }
+}

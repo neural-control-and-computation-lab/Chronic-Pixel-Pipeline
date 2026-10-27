@@ -52,3 +52,13 @@ Thumbs.db
 
 # Claude Code
 .claude/
+
+# Publication assets belong in the external Dropbox manuscript tree
+Manuscript/
+manuscript/
+papers/
+references/
+publication/output/
+publication/source_data/
+*.docx
+*.pdf
