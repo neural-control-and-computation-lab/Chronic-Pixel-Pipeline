@@ -62,3 +62,10 @@ publication/output/
 publication/source_data/
 *.docx
 *.pdf
+
+# Private manuscript and surgical production must never be added.
+publication/
+Figure_Workbench/
+Figures/
+*Manuscript*
+tests/test_publication*.py
