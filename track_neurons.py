@@ -97,6 +97,7 @@ SURVEY_DIRS = {
     '20261001': 'SvyPrb_2026-10-01T14.21.07_g0',
     '20261013': 'SvyPrb_2026-10-13T13.14.56_g0',
     '20261022': 'SvyPrb_2026-10-22T14.47.29_g0',
+    '20261027': 'SvyPrb_2026-10-27T09.33.53_g0',
 }
 
 # Surveys excluded from cross-day tracking analyses (still sorted, just not

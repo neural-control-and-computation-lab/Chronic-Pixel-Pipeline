@@ -83,12 +83,16 @@ def main():
     logging.basicConfig(level=logging.INFO,
                          format='%(asctime)s [%(levelname)s] %(message)s',
                          datefmt='%H:%M:%S')
-    if len(sys.argv) < 2:
-        print('Usage: python figure_sync.py <subdir> [<subdir> ...]')
+    recursive = '--recursive' in sys.argv
+    # Flags must not be treated as subdirectory names, or the run ends with a
+    # spurious "Source dir missing: .../--recursive" warning.
+    subdirs = [a for a in sys.argv[1:] if not a.startswith('--')]
+    if not subdirs:
+        print('Usage: python figure_sync.py <subdir> [<subdir> ...] [--recursive]')
         print('Example: python figure_sync.py tracking drift_concat')
         sys.exit(1)
-    for sub in sys.argv[1:]:
-        sync_to_dropbox(sub, recursive='--recursive' in sys.argv)
+    for sub in subdirs:
+        sync_to_dropbox(sub, recursive=recursive)
 
 
 if __name__ == '__main__':
