@@ -48,6 +48,9 @@ logger = logging.getLogger(__name__)
 import sys
 REPO = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(REPO / 'src'))
+from chronic_pixel_pipeline.discovery import configure_temp_dir
+configure_temp_dir()
 
 
 def _detect_torch_device():
@@ -71,7 +74,7 @@ def discover_segments(data_dir):
     Returns list of dicts: {path, bank, n_channels, has_imu}
     sorted by bank number.
     """
-    from chronic_pixel_pipeline.packet import detect_format
+    from chronic_pixel_pipeline.packet import detect_format, is_usable_segment
 
     data_dir = Path(data_dir)
     dat_files = sorted(data_dir.glob('*.dat'), key=lambda p: p.name.lower())
@@ -82,6 +85,9 @@ def discover_segments(data_dir):
     segments = []
     for f in dat_files:
         bank, n_channels, packet_size, has_imu = detect_format(str(f))
+        if not is_usable_segment(f):
+            logger.warning("  Skipping unusable stub segment %s (bank %d)", f.name, bank)
+            continue
         segments.append({
             'path': f,
             'bank': bank,
@@ -196,7 +202,7 @@ def plot_imu(imu_data, fig_dir):
 # ── Phase 3: Per-bank sorting ────────────────────────────────────────
 
 def sort_one_bank(seg, trodesconf_path, output_dir, torch_device, force=False,
-                   notch=True):
+                   notch=False):
     """Load, preprocess, and sort one bank segment.
 
     Returns (sorting, rec_pp, bank_id, n_units) or (None, None, bank_id, 0)
@@ -206,7 +212,7 @@ def sort_one_bank(seg, trodesconf_path, output_dir, torch_device, force=False,
     import chronic_pixel_pipeline as cpp
     from chronic_pixel_pipeline.preprocessing import preprocess
     from chronic_pixel_pipeline.probe_geometry import (
-        make_probe_for_bank, make_probe_from_trodesconf,
+        make_wireless_bank_probe, make_probe_from_trodesconf,
     )
 
     bank_id = seg['bank']
@@ -227,7 +233,7 @@ def sort_one_bank(seg, trodesconf_path, output_dir, torch_device, force=False,
         probe = make_probe_from_trodesconf(trodesconf_path, None,
                                             rec.get_num_channels())
     else:
-        probe = make_probe_for_bank(bank_id, rec.get_num_channels(), 'NP1032')
+        probe = make_wireless_bank_probe(rec.get_num_channels(), 'NP1032', bank_id, global_z=False)
     rec.set_probe(probe, in_place=True)
 
     dur = rec.get_total_duration()
@@ -239,8 +245,10 @@ def sort_one_bank(seg, trodesconf_path, output_dir, torch_device, force=False,
     # 1700 Hz (and its 2nd harmonic at 3400 Hz). The noise has a wide hump
     # (~150 Hz FWHM in raw, broader at the shoulder) so use Q=10 to cover
     # 1500-1900 Hz fully. CMR helps further. Pass --no-notch to skip.
+    import spikeinterface.full as si
+    si.set_global_job_kwargs(n_jobs=4, chunk_duration='1s', progress_bar=False)
     pp_kwargs = dict(freq_min=300, freq_max=6000, destripe=False,
-                      cmr=True, phase_shift=True)
+                      cmr=True, phase_shift=False)
     if notch:
         pp_kwargs['notch_freqs'] = [1700, 3400]
         pp_kwargs['notch_q'] = 10
@@ -519,9 +527,9 @@ def main():
     parser.add_argument('--force', action='store_true',
                         help='Force re-sort even if output exists')
     parser.add_argument('--device', type=str, default=None)
-    parser.add_argument('--no-notch', action='store_true',
-                        help='Skip wireless-specific notch filtering (use '
-                              'plain bandpass + CMR + phase_shift)')
+    parser.add_argument('--notch', action='store_true', default=False,
+                        help='Enable optional 1700+3400 Hz notch filter (disabled by default to match April21 baseline)')
+    parser.add_argument('--no-notch', action='store_true', help='Compatibility alias (notch is off by default)')
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
@@ -572,7 +580,7 @@ def main():
     for seg in segments:
         sorting, rec_pp, bank_id, n_units = sort_one_bank(
             seg, args.trodesconf, output_dir, torch_device, force=args.force,
-            notch=not args.no_notch)
+            notch=bool(args.notch and not args.no_notch))
         sort_results.append((bank_id, sorting, rec_pp))
 
     # Phase 4: Analyze each bank

@@ -28,6 +28,12 @@ os.environ['MKL_NUM_THREADS'] = '1'
 os.environ['OPENBLAS_NUM_THREADS'] = '1'
 os.environ['NUMBA_NUM_THREADS'] = '1'
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent / 'src'))
+from chronic_pixel_pipeline.discovery import AP_PRIMARY_BANKS, configure_temp_dir, discover_surveys
+configure_temp_dir()
+
 import logging
 import platform
 import re
@@ -74,54 +80,12 @@ def _detect_torch_device():
 
 DATA_ROOT = _default_data_root()
 
-# All known survey directories (paths are relative to DATA_ROOT)
-SURVEYS = {
-    '20260226': 'SvyPrb_2026-02-26T11.58.07_g0',
-    '20260302': 'SvyPrb_2026-03-02T14.10.26_g0',
-    '20260304': 'SvyPrb_2026-03-04T10.17.50_g0',
-    '20260306': 'SvyPrb_2026-03-06T10.01.15_g0',
-    '20260309': 'SvyPrb_2026-03-09T13.27.11_g0',
-    '20260311': 'SvyPrb_2026-03-11T09.52.30_g0',
-    '20260313': 'SvyPrb_2026-03-13T13.14.59_g0',
-    '20260316': 'SvyPrb_2026-03-16T10.56.17_g0',
-    '20260319': 'SvyPrb_2026-03-19T10.11.39_g0',
-    '20260323': 'SvyPrb_2026-03-23T11.18.04_g0',
-    '20260326': 'SvyPrb_2026-03-26T11.33.18_g0',
-    '20260331': 'SvyPrb_2026-03-31T14.35.53_g0',
-    '20260402': 'SvyPrb_2026-04-02T14.08.31_g0',
-    '20260407': 'SvyPrb_2026-04-07T13.09.12_g0',
-    '20260409': 'SvyPrb_2026-04-09T14.36.02_g0',
-    '20260414': 'SvyPrb_2026-04-14T13.19.39_g0',
-    '20260417': 'SvyPrb_2026-04-17T10.24.24_g0',
-    '20260421': 'SvyPrb_2026-04-21T14.44.42_g0',
-    '20260424': 'SvyPrb_2026-04-24T12.31.37_g0',
-    '20260428': 'SvyPrb_2026-04-28T12.56.18_g0',
-    '20260501': 'SvyPrb_2026-05-01T13.06.12_g0',
-    '20260507': 'SvyPrb_2026-05-07T14.16.53_g0',
-    '20260512': 'SvyPrb_2026-05-12T13.38.51_g0',
-    '20260522': 'SvyPrb_2026-05-22T12.22.23_g0',
-    '20260526': 'SvyPrb_2026-05-26T13.16.22_g0',
-    '20260604': 'SvyPrb_2026-06-04T13.34.16_g0',
-    '20260611': 'SvyPrb_2026-06-11T14.09.05_g0',
-    '20260618': 'SvyPrb_2026-06-18T15.12.37_g0',
-    '20260625': 'SvyPrb_2026-06-25T10.11.07_g0',
-    '20260723': 'SvyPrb_2026-07-23T14.18.28_g0',
-    '20260730': 'SvyPrb_2026-07-30T14.27.42_g0',
-    '20260813': 'SvyPrb_2026-08-13T14.08.28_g0',
-    '20260820': 'SvyPrb_2026-08-20T15.03.05_g0',
-    '20260826': 'SvyPrb_2026-08-26T13.01.32_g0',
-    '20260914': 'SvyPrb_2026-09-14T11.35.54_g0',
-    '20260924': 'SvyPrb_2026-09-24T14.44.18_g0',
-    '20261001': 'SvyPrb_2026-10-01T14.21.07_g0',
-    '20261013': 'SvyPrb_2026-10-13T13.14.56_g0',
-    '20261022': 'SvyPrb_2026-10-22T14.47.29_g0',
-    '20261027': 'SvyPrb_2026-10-27T09.33.53_g0',
-}
+SURVEYS = discover_surveys(exclude_keys=())
 
 
 def _survey_dir(key):
     """Return the raw SpikeGLX data directory for a survey."""
-    return DATA_ROOT / SURVEYS[key]
+    return Path(SURVEYS[key])
 
 
 def _output_dir(key):
@@ -887,7 +851,7 @@ def main():
                             force=force)
     else:
         # Default: latest survey
-        key = '20261027'
+        key = sorted(SURVEYS.keys())[-1]
         sort_one_survey(key, _survey_dir(key), _output_dir(key),
                         fig_dir=_fig_dir(key), torch_device=torch_device,
                         bank_filter=bank_filter, force=force)

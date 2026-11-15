@@ -28,6 +28,9 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent / 'src'))
+from chronic_pixel_pipeline.discovery import configure_temp_dir, discover_wireless_sessions
+configure_temp_dir()
 from auto_classify_units import ensure_extensions, _build_feature_df
 
 DATA_ROOT = Path(os.environ.get('DATA_ROOT', 'E:/'))
@@ -116,7 +119,7 @@ def main():
         targets = sorted(d.name.replace('survey_', '')
                           for d in SORT_ROOT.glob('survey_*'))
         if args.include_wireless:
-            for w in ['April21_wireless', 'March31_wireless', 'March23_wireless']:
+            for w in sorted(discover_wireless_sessions().keys()):
                 if (SORT_ROOT / w).exists():
                     targets.append(w)
 

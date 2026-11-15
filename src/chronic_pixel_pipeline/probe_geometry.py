@@ -329,3 +329,32 @@ def make_full_probe(probe_part_number="NP1032"):
     )
 
     return probe
+
+
+def make_wireless_bank_probe(n_channels: int = 384, probe_part_number: str = "NP1032",
+                             bank_number: int = 0, global_z: bool = False):
+    """Build the verified SpikeGadgets wireless `.dat` hardware-channel-to-site probe.
+
+    Matches the empirical 20260311_100744.trodesconf and SpikeInterface sorting
+    geometry (`even hw -> x=114 um`, `odd hw -> x=11 um`, `row = (pair % 16)*12 + pair//16`).
+    """
+    from probeinterface import Probe
+
+    hw = np.arange(n_channels)
+    pair = hw // 2
+    col = 1 - (hw % 2)
+    row = (pair % 16) * 12 + (pair // 16)
+    x = np.where(col == 0, 11.0, 114.0)
+    y = row * 20.0 + (float(bank_number) * 3840.0 if global_z else 0.0)
+    positions = np.column_stack([x, y])
+
+    probe = Probe(ndim=2, si_units="um")
+    probe.set_contacts(positions=positions, shapes="square", shape_params={"width": 12.0})
+    probe.set_device_channel_indices(np.arange(n_channels))
+    probe.create_auto_shape(probe_type="tip")
+    probe.annotate(
+        manufacturer="imec",
+        probe_part_number=probe_part_number,
+        bank_number=bank_number,
+    )
+    return probe

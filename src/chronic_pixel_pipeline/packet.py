@@ -1,46 +1,63 @@
-"""Packet format constants and parsing for SpikeGadgets Neuropixels wireless data logger."""
+"""Packet format constants and streaming parsing for SpikeGadgets Neuropixels wireless data logger."""
 
+import os
 import struct
 from pathlib import Path
 
 import numpy as np
 
 # --- Format constants ---
+SYNC_BYTE = 0x55
 MAGIC_STANDARD = 0x1155  # Standard firmware (no IMU)
-MAGIC_IMU = 0x1655       # IMU-enabled firmware v1 (accel/gyro/mag)
-MAGIC_IMU_V2 = 0x1755    # IMU-enabled firmware v2
-MAGIC_IMU_V3 = 0x1855    # IMU-enabled firmware v3
-MAGIC_IMU_V4 = 0x1955    # IMU-enabled firmware v4
-MAGIC_IMU_V5 = 0x0855    # IMU-enabled firmware v5
-MAGIC_IMU_V6 = 0x0955    # IMU-enabled firmware v6
-MAGIC_IMU_V7 = 0x0A55    # IMU-enabled firmware v7
-MAGIC_IMU_V8 = 0x0B55    # IMU-enabled firmware v8
-MAGIC_IMU_V9 = 0x1A55    # IMU-enabled firmware v9
-MAGIC_IMU_V10 = 0x0C55   # IMU-enabled firmware v10
-MAGIC_IMU_V11 = 0x1B55   # IMU-enabled firmware v11
-MAGIC_IMU_V12 = 0x1C55   # IMU-enabled firmware v12
-MAGIC_IMU_V13 = 0x0D55   # IMU-enabled firmware v13
-MAGIC_IMU_V14 = 0x0E55   # IMU-enabled firmware v14
-MAGIC_IMU_V15 = 0x1F55   # IMU-enabled firmware v15
-VALID_MAGICS = {MAGIC_STANDARD, MAGIC_IMU, MAGIC_IMU_V2, MAGIC_IMU_V3, MAGIC_IMU_V4, MAGIC_IMU_V5, MAGIC_IMU_V6, MAGIC_IMU_V7, MAGIC_IMU_V8, MAGIC_IMU_V9, MAGIC_IMU_V10, MAGIC_IMU_V11, MAGIC_IMU_V12, MAGIC_IMU_V13, MAGIC_IMU_V14, MAGIC_IMU_V15}
-IMU_MAGICS = {MAGIC_IMU, MAGIC_IMU_V2, MAGIC_IMU_V3, MAGIC_IMU_V4, MAGIC_IMU_V5, MAGIC_IMU_V6, MAGIC_IMU_V7, MAGIC_IMU_V8, MAGIC_IMU_V9, MAGIC_IMU_V10, MAGIC_IMU_V11, MAGIC_IMU_V12, MAGIC_IMU_V13, MAGIC_IMU_V14, MAGIC_IMU_V15}
+MAGIC_IMU = 0x1655       # IMU-enabled firmware v1
+MAGIC_IMU_V2 = 0x1755
+MAGIC_IMU_V3 = 0x1855
+MAGIC_IMU_V4 = 0x1955
+MAGIC_IMU_V5 = 0x0855
+MAGIC_IMU_V6 = 0x0955
+MAGIC_IMU_V7 = 0x0A55
+MAGIC_IMU_V8 = 0x0B55
+MAGIC_IMU_V9 = 0x1A55
+MAGIC_IMU_V10 = 0x0C55
+MAGIC_IMU_V11 = 0x1B55
+MAGIC_IMU_V12 = 0x1C55
+MAGIC_IMU_V13 = 0x0D55
+MAGIC_IMU_V14 = 0x0E55
+MAGIC_IMU_V15 = 0x1F55
+MAGIC_IMU_V16 = 0x1D55
+MAGIC_IMU_V17 = 0x2455
+VALID_MAGICS = {
+    MAGIC_STANDARD, MAGIC_IMU, MAGIC_IMU_V2, MAGIC_IMU_V3, MAGIC_IMU_V4,
+    MAGIC_IMU_V5, MAGIC_IMU_V6, MAGIC_IMU_V7, MAGIC_IMU_V8, MAGIC_IMU_V9,
+    MAGIC_IMU_V10, MAGIC_IMU_V11, MAGIC_IMU_V12, MAGIC_IMU_V13, MAGIC_IMU_V14,
+    MAGIC_IMU_V15, MAGIC_IMU_V16, MAGIC_IMU_V17,
+}
+IMU_MAGICS = VALID_MAGICS - {MAGIC_STANDARD}
+
 HEADER_SIZE = 80  # bytes per packet header
 SAMPLING_RATE = 30_000.0  # Hz (Neuropixels AP band)
 DTYPE = np.dtype("<i2")  # int16, little-endian
 BYTES_PER_SAMPLE = 2
-CHANNELS_PER_BANK = 48  # each bit in the bank bitmask = 48 channels
+CHANNELS_PER_BANK = 48  # each bit in the idle bank bitmask = 48 channels
 
-# Header field byte offsets
-MAGIC_OFFSET = 0  # 2 bytes, uint16 LE
-BANK_OFFSET = 3  # 1 byte, probe group/bank number (0-11)
-CHANNEL_BITMASK_OFFSET = 5  # 1 byte, popcount * 48 = n_channels
-CYCLE_BANK_OFFSET = 10   # 1 byte, bank rotation bitmask (bits 0-7)
-CYCLE_MUX_OFFSET = 11    # 1 byte, multiplexed device ID
-METADATA_OFFSET = 12     # 64 bytes (32 x int16 status/metadata)
-COUNTER_OFFSET = 76      # 4 bytes, packet counter
-DATA_OFFSET = 80         # neural data starts here
+# Empirically verified header byte offsets (848-byte Trodes packet)
+MAGIC_OFFSET = 0             # 2 bytes: [sync=0x55, Controller_DIO]
+DIO_OFFSET = 1               # 1 byte: Controller_DIO
+MUX_FLAG_OFFSET = 2          # 1 byte: multiplexed sensor/status flag
+BANK_OFFSET = 3              # 1 byte: active probe bank ID (when mux_flag == 0x00)
+MUX_XYZ_OFFSET = 4           # 6 bytes: 3 x <i2 sensor XYZ payload (when mux_flag != 0)
+CHANNEL_BITMASK_OFFSET = 5   # 1 byte: active channel mask on idle packets
+LFP_CYCLE_OFFSET = 10        # 2 bytes: 12-step cycle one-hot LFP mask
+LFP_DATA_OFFSET = 12         # 64 bytes: 32 x <i2 LFP samples
+COUNTER_OFFSET = 76          # 4 bytes: <u4 30 kHz hardware packet counter
+DATA_OFFSET = 80             # neural AP data starts here (384 x <i2)
 
-# Multiplexed device IDs (byte 11)
+# Backwards-compatible aliases
+CYCLE_BANK_OFFSET = LFP_CYCLE_OFFSET
+CYCLE_MUX_OFFSET = MUX_FLAG_OFFSET
+METADATA_OFFSET = LFP_DATA_OFFSET
+
+# Multiplexed device flags (byte 2)
 MUX_NONE = 0x00
 MUX_RFSYNC = 0x01
 MUX_MAG = 0x02
@@ -49,185 +66,230 @@ MUX_ACCEL = 0x08
 MUX_ACK = 0x10
 MUX_AIN = 0x20
 
-# IMU cycle: 12 packets total, 8 bank rotation + 4 sensor
-# Effective IMU sample rate = SAMPLING_RATE / 12
-IMU_CYCLE_LENGTH = 12
-IMU_SAMPLING_RATE = SAMPLING_RATE / IMU_CYCLE_LENGTH  # 2500 Hz
+# Empirically calibrated IMU conversion constants
+ACCEL_LSB_PER_G = 16384.0    # +-2 g 16-bit full scale (resting norm ~ 0.92-0.99 g)
+GYRO_LSB_PER_DPS = 131.072   # +-250 deg/s nominal 16-bit scale
 
-# IMU channel names and mux IDs in extraction order
-IMU_CHANNELS = ["accel_x", "accel_y", "accel_z",
-                "gyro_x", "gyro_y", "gyro_z",
-                "mag_x", "mag_y", "mag_z"]
+IMU_CHANNELS = [
+    "accel_x", "accel_y", "accel_z",
+    "gyro_x", "gyro_y", "gyro_z",
+    "mag_x", "mag_y", "mag_z",
+]
 
-# Mapping from mux ID to (channel_prefix, metadata int16 indices for X, Y, Z)
 IMU_MUX_MAP = {
     MUX_ACCEL: ("accel", 0, 1, 2),
-    MUX_GYRO:  ("gyro",  0, 1, 2),
-    MUX_MAG:   ("mag",   0, 1, 2),
+    MUX_GYRO: ("gyro", 0, 1, 2),
+    MUX_MAG: ("mag", 0, 1, 2),
 }
 
 
 def compute_n_channels(bitmask: int) -> int:
-    """Compute number of active channels from the channel bank bitmask (byte 5).
-
-    Each set bit represents a bank of 48 channels.
-    """
-    return bin(bitmask).count("1") * CHANNELS_PER_BANK
+    """Compute number of active channels from the channel bitmask (48 ch/bit)."""
+    n_ch = bin(int(bitmask)).count("1") * CHANNELS_PER_BANK
+    return n_ch if n_ch > 0 else 384
 
 
 def compute_packet_size(n_channels: int) -> int:
     """Compute total packet size in bytes given the number of channels."""
-    return HEADER_SIZE + n_channels * BYTES_PER_SAMPLE
+    return HEADER_SIZE + int(n_channels) * BYTES_PER_SAMPLE
 
 
 def parse_header(header_bytes: bytes) -> dict:
-    """Parse an 80-byte packet header.
-
-    Parameters
-    ----------
-    header_bytes : bytes
-        Exactly 80 bytes from the start of a packet.
-
-    Returns
-    -------
-    dict with keys: magic, has_imu, bank, n_channels, packet_size,
-                    cycle_bank, mux_id, metadata
-    """
+    """Parse an 80-byte packet header."""
     if len(header_bytes) < HEADER_SIZE:
         raise ValueError(
             f"Header must be at least {HEADER_SIZE} bytes, got {len(header_bytes)}"
         )
 
-    magic = struct.unpack_from("<H", header_bytes, MAGIC_OFFSET)[0]
-    if magic not in VALID_MAGICS:
+    sync = header_bytes[0]
+    if sync != SYNC_BYTE:
         raise ValueError(
-            f"Invalid magic number: 0x{magic:04x} "
-            f"(expected one of {', '.join(f'0x{m:04x}' for m in VALID_MAGICS)})"
+            f"Invalid sync byte: 0x{sync:02x} (expected 0x{SYNC_BYTE:02x})"
         )
 
+    magic = struct.unpack_from("<H", header_bytes, MAGIC_OFFSET)[0]
+    mux_id = header_bytes[MUX_FLAG_OFFSET]
     bank = header_bytes[BANK_OFFSET]
-    bitmask = header_bytes[CHANNEL_BITMASK_OFFSET]
+    bitmask = header_bytes[CHANNEL_BITMASK_OFFSET] if mux_id == MUX_NONE else 0xFF
     n_channels = compute_n_channels(bitmask)
-    cycle_bank = header_bytes[CYCLE_BANK_OFFSET]
-    mux_id = header_bytes[CYCLE_MUX_OFFSET]
-    metadata = np.frombuffer(header_bytes, dtype=DTYPE, count=32, offset=METADATA_OFFSET)
+    counter = struct.unpack_from("<I", header_bytes, COUNTER_OFFSET)[0]
+    xyz = np.frombuffer(header_bytes, dtype=DTYPE, count=3, offset=MUX_XYZ_OFFSET).copy()
+    metadata = np.frombuffer(header_bytes, dtype=DTYPE, count=32, offset=METADATA_OFFSET).copy()
 
     return {
         "magic": magic,
-        "has_imu": magic in IMU_MAGICS,
+        "has_imu": (magic != MAGIC_STANDARD) and ((magic & 0xFF) == SYNC_BYTE),
         "bank": bank,
         "channel_bitmask": bitmask,
         "n_channels": n_channels,
         "packet_size": compute_packet_size(n_channels),
-        "cycle_bank": cycle_bank,
+        "cycle_bank": struct.unpack_from("<H", header_bytes, LFP_CYCLE_OFFSET)[0],
         "mux_id": mux_id,
-        "metadata": metadata.copy(),
+        "xyz": xyz,
+        "counter": counter,
+        "metadata": metadata,
     }
 
 
-def detect_format(filepath: Path) -> tuple:
-    """Auto-detect the format of a SpikeGadgets dat file from its first header.
-
-    Parameters
-    ----------
-    filepath : Path or str
-        Path to a .dat file.
-
-    Returns
-    -------
-    (bank_number, n_channels, packet_size, has_imu) : tuple[int, int, int, bool]
-    """
+def detect_format(filepath: Path, sample_packets: int = 2000) -> tuple:
+    """Auto-detect bank, n_channels, packet_size, and IMU availability via bounded read."""
     filepath = Path(filepath)
-    with open(filepath, "rb") as f:
-        header_bytes = f.read(HEADER_SIZE)
-
-    if len(header_bytes) < HEADER_SIZE:
+    fsize = filepath.stat().st_size
+    if fsize < HEADER_SIZE:
         raise ValueError(f"File too small to contain a valid header: {filepath}")
 
-    info = parse_header(header_bytes)
-    return info["bank"], info["n_channels"], info["packet_size"], info["has_imu"]
+    with open(filepath, "rb") as f:
+        first_hdr = f.read(HEADER_SIZE)
+        info0 = parse_header(first_hdr)
+        packet_size = info0["packet_size"]
+        n_packets = fsize // packet_size
+        read_n = min(n_packets, max(1, int(sample_packets)))
+        f.seek(0)
+        buf = np.frombuffer(f.read(read_n * packet_size), dtype=np.uint8)
+        pkts = buf.reshape(read_n, packet_size)
+
+    if not np.all(pkts[:, 0] == SYNC_BYTE):
+        raise ValueError(f"Sync byte 0x{SYNC_BYTE:02x} violation in {filepath}")
+
+    idle_mask = pkts[:, MUX_FLAG_OFFSET] == MUX_NONE
+    if np.any(idle_mask):
+        bank = int(np.bincount(pkts[idle_mask, BANK_OFFSET]).argmax())
+    else:
+        bank = int(info0["bank"])
+
+    return bank, int(info0["n_channels"]), int(packet_size), bool(info0["has_imu"])
 
 
 def count_packets(filepath: Path, packet_size: int) -> int:
-    """Count the number of complete packets in a file.
-
-    Parameters
-    ----------
-    filepath : Path or str
-        Path to a .dat file.
-    packet_size : int
-        Size of each packet in bytes.
-
-    Returns
-    -------
-    int
-        Number of complete packets (partial trailing packet is ignored).
-    """
+    """Count the number of complete packets in a file."""
     filepath = Path(filepath)
-    file_size = filepath.stat().st_size
-    return file_size // packet_size
+    return filepath.stat().st_size // int(packet_size)
 
 
-def extract_imu(filepath: Path) -> dict:
-    """Extract IMU (accelerometer, gyroscope, magnetometer) data from a .dat file.
+def is_usable_segment(filepath: Path, min_packets: int = 5000) -> bool:
+    """Return True if .dat file has enough packets and a valid neural bank (not bank 15 stub)."""
+    bank, _n_ch, psize, _imu = detect_format(filepath)
+    n_pkts = count_packets(filepath, psize)
+    return (n_pkts >= int(min_packets)) and (0 <= int(bank) <= 11)
 
-    IMU data is embedded in the packet headers of IMU-enabled recordings
-    (magic 0x1655). The data is multiplexed across a 12-packet cycle:
-    8 bank-rotation packets + 1 RFsync + 1 magnetometer + 1 gyroscope + 1 accelerometer.
 
-    Each sensor packet carries X, Y, Z values in metadata int16 positions 0, 1, 2.
+def find_continuity_blocks(counters: np.ndarray) -> dict:
+    """Identify contiguous dt == 1 blocks and counter jumps (packet drops)."""
+    ts = np.asarray(counters, dtype=np.uint64).ravel()
+    n = ts.size
+    if n == 0:
+        return {"block_ids": np.empty(0, dtype=np.int64), "blocks": [], "gaps": []}
+    dt = np.diff(ts.astype(np.int64))
+    break_idx = np.flatnonzero(dt != 1) + 1
+    starts = np.concatenate(([0], break_idx))
+    ends = np.concatenate((break_idx, [n]))
+    block_ids = np.empty(n, dtype=np.int64)
+    blocks = []
+    for bid, (s, e) in enumerate(zip(starts, ends)):
+        block_ids[s:e] = bid
+        blocks.append({
+            "block_id": int(bid),
+            "start_pkt": int(s),
+            "end_pkt": int(e),
+            "n_packets": int(e - s),
+            "start_counter": int(ts[s]),
+            "end_counter": int(ts[e - 1]),
+        })
+    gaps = [
+        {
+            "packet_index": int(bi),
+            "prev_counter": int(ts[bi - 1]),
+            "curr_counter": int(ts[bi]),
+            "delta_ticks": int(ts[bi]) - int(ts[bi - 1]),
+        }
+        for bi in break_idx
+    ]
+    return {"block_ids": block_ids, "blocks": blocks, "gaps": gaps}
 
-    Parameters
-    ----------
-    filepath : Path or str
-        Path to a .dat file with IMU-enabled firmware.
 
-    Returns
-    -------
-    dict with keys:
-        - "accel": np.ndarray, shape (N, 3), int16 — accelerometer X, Y, Z
-        - "gyro":  np.ndarray, shape (N, 3), int16 — gyroscope X, Y, Z
-        - "mag":   np.ndarray, shape (N, 3), int16 — magnetometer X, Y, Z
-        - "sampling_rate": float — effective IMU sampling rate (2500 Hz)
-        - "channels": list[str] — channel names in order
+def extract_imu(filepath: Path, chunk_packets: int = 250_000) -> dict:
+    """Stream-extract multiplexed IMU streams using verified offsets (byte 2, bytes 4..9, bytes 76..79).
 
-    Raises
-    ------
-    ValueError
-        If the file does not use IMU-enabled firmware.
+    Reads large .dat files in chunks so multi-GB recordings require <250 MB RAM.
+    Computes empirical IMU sampling rate from packet spans (~98.0 Hz) and scales
+    accelerometer counts to gravitational units via ACCEL_LSB_PER_G (16,384 LSB/g).
     """
     filepath = Path(filepath)
     bank, n_channels, packet_size, has_imu = detect_format(filepath)
-
     if not has_imu:
-        raise ValueError(
-            f"File does not contain IMU data (magic 0x{MAGIC_STANDARD:04x}, "
-            f"expected 0x{MAGIC_IMU:04x}): {filepath}"
-        )
+        raise ValueError(f"File does not contain IMU firmware magic: {filepath}")
 
-    file_size = filepath.stat().st_size
-    n_packets = file_size // packet_size
+    n_packets = count_packets(filepath, packet_size)
+    accel_chunks, accel_idx = [], []
+    gyro_chunks, gyro_idx = [], []
+    mag_chunks, mag_idx = [], []
+    rf_idx = []
+    counters = np.empty(n_packets, dtype=np.uint32)
 
-    # Read all packet headers at once using strided access
-    raw = np.fromfile(filepath, dtype=np.uint8, count=n_packets * packet_size)
-    raw = raw.reshape(n_packets, packet_size)
+    pkt_offset = 0
+    with open(filepath, "rb") as f:
+        while pkt_offset < n_packets:
+            take = min(chunk_packets, n_packets - pkt_offset)
+            buf = np.frombuffer(f.read(take * packet_size), dtype=np.uint8).reshape(take, packet_size)
+            if not np.all(buf[:, 0] == SYNC_BYTE):
+                bad = int(np.flatnonzero(buf[:, 0] != SYNC_BYTE)[0]) + pkt_offset
+                raise ValueError(f"Sync byte error at packet {bad} in {filepath.name}")
 
-    # Extract mux_id (byte 11) for every packet
-    mux_ids = raw[:, CYCLE_MUX_OFFSET]
+            flags = buf[:, MUX_FLAG_OFFSET]
+            xyz = np.ascontiguousarray(buf[:, MUX_XYZ_OFFSET : MUX_XYZ_OFFSET + 6]).view(DTYPE).reshape(take, 3)
+            counters[pkt_offset : pkt_offset + take] = (
+                np.ascontiguousarray(buf[:, COUNTER_OFFSET : COUNTER_OFFSET + 4]).view("<u4").ravel()
+            )
 
-    # Extract metadata region (bytes 12-75) as int16 for every packet
-    # metadata is 64 bytes = 32 int16 values
-    meta_bytes = raw[:, METADATA_OFFSET:METADATA_OFFSET + 64]
-    meta_int16 = np.ascontiguousarray(meta_bytes).view(DTYPE).reshape(n_packets, 32)
+            m_acc = (flags & MUX_ACCEL) != 0
+            if np.any(m_acc):
+                accel_chunks.append(xyz[m_acc].copy())
+                accel_idx.append(np.flatnonzero(m_acc) + pkt_offset)
 
-    result = {
-        "sampling_rate": IMU_SAMPLING_RATE,
+            m_gyr = (flags & MUX_GYRO) != 0
+            if np.any(m_gyr):
+                gyro_chunks.append(xyz[m_gyr].copy())
+                gyro_idx.append(np.flatnonzero(m_gyr) + pkt_offset)
+
+            m_mag = (flags & MUX_MAG) != 0
+            if np.any(m_mag):
+                mag_chunks.append(xyz[m_mag].copy())
+                mag_idx.append(np.flatnonzero(m_mag) + pkt_offset)
+
+            m_rf = (flags & MUX_RFSYNC) != 0
+            if np.any(m_rf):
+                rf_idx.append(np.flatnonzero(m_rf) + pkt_offset)
+
+            pkt_offset += take
+
+    accel = np.vstack(accel_chunks) if accel_chunks else np.empty((0, 3), dtype=DTYPE)
+    gyro = np.vstack(gyro_chunks) if gyro_chunks else np.empty((0, 3), dtype=DTYPE)
+    mag = np.vstack(mag_chunks) if mag_chunks else np.empty((0, 3), dtype=DTYPE)
+    acc_pkt = np.concatenate(accel_idx) if accel_idx else np.empty(0, dtype=np.int64)
+    gyr_pkt = np.concatenate(gyro_idx) if gyro_idx else np.empty(0, dtype=np.int64)
+    mag_pkt = np.concatenate(mag_idx) if mag_idx else np.empty(0, dtype=np.int64)
+    rf_pkt = np.concatenate(rf_idx) if rf_idx else np.empty(0, dtype=np.int64)
+
+    cont = find_continuity_blocks(counters)
+    dur_s = n_packets / SAMPLING_RATE
+    emp_fs = (len(accel) / dur_s) if (dur_s > 0 and len(accel) > 0) else 98.0
+
+    return {
+        "bank": bank,
+        "n_packets": int(n_packets),
+        "duration_s": float(dur_s),
+        "sampling_rate": float(emp_fs),
         "channels": IMU_CHANNELS,
+        "accel": accel,
+        "accel_g": accel.astype(np.float64) / ACCEL_LSB_PER_G,
+        "gyro": gyro,
+        "mag": mag,
+        "accel_pkt_idx": acc_pkt,
+        "gyro_pkt_idx": gyr_pkt,
+        "mag_pkt_idx": mag_pkt,
+        "rfsync_pkt_idx": rf_pkt,
+        "packet_counters": counters,
+        "continuity_blocks": cont["blocks"],
+        "gaps": cont["gaps"],
+        "n_gap_events": len(cont["gaps"]),
     }
-
-    for mux_id, (prefix, ix, iy, iz) in IMU_MUX_MAP.items():
-        mask = mux_ids == mux_id
-        sensor_meta = meta_int16[mask]
-        result[prefix] = sensor_meta[:, [ix, iy, iz]].copy()
-
-    return result

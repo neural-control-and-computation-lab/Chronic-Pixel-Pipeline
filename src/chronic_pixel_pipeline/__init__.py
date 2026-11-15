@@ -1,68 +1,61 @@
-"""Chronic Pixel Pipeline — SpikeGadgets Neuropixels wireless data toolbox.
+"""Chronic Pixel Pipeline — SpikeGadgets Neuropixels wireless & survey toolbox."""
 
-A Python library for reading, preprocessing, spike sorting, and visualizing
-chronic Neuropixels long probe recordings from SpikeGadgets wireless data
-loggers. Built on SpikeInterface.
+__version__ = "0.2.0"
 
-Quick start::
-
-    import chronic_pixel_pipeline as cpp
-
-    # Load a recording
-    rec = cpp.load_segment("recording.dat")
-
-    # Remove bad channels and preprocess
-    rec_clean, good_ids, info = cpp.remove_bad_channels(rec)
-    rec_pp = cpp.preprocess(rec_clean)
-
-See :mod:`chronic_pixel_pipeline.diagnostics` for visualization tools and
-:mod:`chronic_pixel_pipeline.analysis` for post-sorting analysis.
-"""
-
-__version__ = "0.1.0"
-
-# ── Data loading ──────────────────────────────────────────────────────────────
+from .discovery import (
+    AP_PRIMARY_BANKS,
+    configure_temp_dir,
+    discover_surveys,
+    discover_wireless_sessions,
+)
 from .io import load_all_segments, load_concatenated, load_imu, load_segment
-
-# ── Low-level packet access ───────────────────────────────────────────────────
-from .packet import count_packets, detect_format, extract_imu, parse_header
-
-# ── Probe geometry ────────────────────────────────────────────────────────────
+from .packet import (
+    ACCEL_LSB_PER_G,
+    GYRO_LSB_PER_DPS,
+    count_packets,
+    detect_format,
+    extract_imu,
+    find_continuity_blocks,
+    is_usable_segment,
+    parse_header,
+)
 from .probe_geometry import (
     electrode_positions,
     make_full_probe,
     make_probe_for_bank,
     make_probe_from_trodesconf,
+    make_wireless_bank_probe,
     parse_trodesconf_channel_map,
 )
-
-# ── Recording extractor ──────────────────────────────────────────────────────
 from .recording import SpikeGadgetsNPXRecording, SpikeGadgetsNPXRecordingSegment
-
-# ── Preprocessing ─────────────────────────────────────────────────────────────
 from .preprocessing import preprocess, remove_bad_channels
 
 __all__ = [
-    # Loading
+    "__version__",
+    "AP_PRIMARY_BANKS",
+    "ACCEL_LSB_PER_G",
+    "GYRO_LSB_PER_DPS",
+    "configure_temp_dir",
+    "discover_surveys",
+    "discover_wireless_sessions",
     "load_segment",
     "load_all_segments",
     "load_concatenated",
     "load_imu",
-    # Recording
     "SpikeGadgetsNPXRecording",
     "SpikeGadgetsNPXRecordingSegment",
-    # Packet
     "detect_format",
+    "is_usable_segment",
+    "find_continuity_blocks",
     "parse_header",
     "count_packets",
     "extract_imu",
-    # Probe geometry
     "electrode_positions",
     "make_probe_for_bank",
+    "make_wireless_bank_probe",
     "make_probe_from_trodesconf",
     "make_full_probe",
     "parse_trodesconf_channel_map",
-    # Preprocessing
     "remove_bad_channels",
     "preprocess",
 ]
