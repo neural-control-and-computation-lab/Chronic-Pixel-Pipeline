@@ -7,6 +7,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from scipy import optimize, stats
 
 
 def load_ks4_drift_trace(bank_dir: Path, fs_hz: float = 30000.0) -> dict[str, Any]:
@@ -202,4 +203,216 @@ def extract_bank_spike_cloud(
         "amp_norm": amp_norm,
         "duration_s": duration_s,
         "n_total_spikes": n_total,
+    }
+
+
+def _safe_pearson_overlap(a: np.ndarray, b: np.ndarray, min_overlap: int) -> float:
+    """Normalized correlation over jointly finite overlapping elements."""
+    mask = np.isfinite(a) & np.isfinite(b)
+    if int(mask.sum()) < min_overlap:
+        return np.nan
+    va = a[mask] - float(np.mean(a[mask]))
+    vb = b[mask] - float(np.mean(b[mask]))
+    denom = float(np.sqrt(np.dot(va, va) * np.dot(vb, vb)))
+    if denom <= 1e-12:
+        return 0.0
+    return float(np.dot(va, vb) / denom)
+
+
+def register_1d_profiles_across_sessions(
+    profiles_2d: np.ndarray,
+    pitch_um: float = 20.0,
+    max_disp_um: float = 600.0,
+    min_corr: float = 0.15,
+    ref_mask: np.ndarray | None = None,
+) -> dict[str, np.ndarray]:
+    """Globally align 1D depth profiles across longitudinal sessions via weighted pairwise xcorr.
+
+    Positive displacement ``displacement_um[j] > displacement_um[i]`` indicates that
+    session ``j``'s spatial landmarks appear shifted toward larger coordinate values
+    relative to session ``i`` (i.e. ``profile[j, y + disp_j] ≈ profile[i, y + disp_i]``).
+    """
+    prof = np.asarray(profiles_2d, dtype=np.float64)
+    if prof.ndim != 2:
+        raise ValueError(f"Expected 2D array (n_sessions, n_depths), got shape {prof.shape}")
+    n_sess, n_depths = prof.shape
+    max_lag_bins = max(1, int(round(float(max_disp_um) / float(pitch_um))))
+    min_overlap = max(20, n_depths // 10)
+    lags = np.arange(-max_lag_bins, max_lag_bins + 1, dtype=np.int64)
+
+    valid_sess = np.array([int(np.isfinite(prof[s]).sum()) >= min_overlap for s in range(n_sess)], dtype=bool)
+    pair_lags = np.full((n_sess, n_sess), np.nan, dtype=np.float64)
+    pair_corrs = np.full((n_sess, n_sess), np.nan, dtype=np.float64)
+    for s in range(n_sess):
+        if valid_sess[s]:
+            pair_lags[s, s] = 0.0
+            pair_corrs[s, s] = 1.0
+
+    for i in range(n_sess):
+        if not valid_sess[i]:
+            continue
+        pi = prof[i]
+        for j in range(i + 1, n_sess):
+            if not valid_sess[j]:
+                continue
+            pj = prof[j]
+            c_arr = np.full(lags.size, np.nan, dtype=np.float64)
+            for li, k in enumerate(lags):
+                if k >= 0:
+                    a = pi[: n_depths - k]
+                    b = pj[k:]
+                else:
+                    a = pi[-k:]
+                    b = pj[: n_depths + k]
+                c_arr[li] = _safe_pearson_overlap(a, b, min_overlap)
+            if not np.any(np.isfinite(c_arr)):
+                continue
+            best_idx = int(np.nanargmax(c_arr))
+            r_peak = float(c_arr[best_idx])
+            sub_bin = 0.0
+            if 0 < best_idx < lags.size - 1:
+                c0, c1, c2 = c_arr[best_idx - 1], c_arr[best_idx], c_arr[best_idx + 1]
+                if np.isfinite(c0) and np.isfinite(c1) and np.isfinite(c2):
+                    denom = c0 - 2.0 * c1 + c2
+                    if denom < -1e-9:
+                        sub_bin = float(np.clip(0.5 * (c0 - c2) / denom, -0.5, 0.5))
+            lag_um = float(lags[best_idx] + sub_bin) * float(pitch_um)
+            pair_lags[i, j] = lag_um
+            pair_lags[j, i] = -lag_um
+            pair_corrs[i, j] = pair_corrs[j, i] = r_peak
+
+    disp = np.full(n_sess, np.nan, dtype=np.float64)
+    active_idx = np.flatnonzero(valid_sess)
+    n_act = active_idx.size
+    if n_act > 0:
+        lap = np.zeros((n_act, n_act), dtype=np.float64)
+        rhs = np.zeros(n_act, dtype=np.float64)
+        for a_i, si in enumerate(active_idx):
+            for a_j in range(a_i + 1, n_act):
+                sj = active_idx[a_j]
+                r_val = pair_corrs[si, sj]
+                l_val = pair_lags[si, sj]
+                if not (np.isfinite(r_val) and np.isfinite(l_val)) or r_val <= min_corr:
+                    continue
+                w = float((r_val - min_corr) ** 2)
+                lap[a_i, a_i] += w
+                lap[a_j, a_j] += w
+                lap[a_i, a_j] -= w
+                lap[a_j, a_i] -= w
+                rhs[a_i] -= w * l_val
+                rhs[a_j] += w * l_val
+        # Anchor gauge constraint so sparse disconnected rows cannot diverge.
+        lap += 1e-6 * np.eye(n_act) + 1e-4 * np.ones((n_act, n_act))
+        z_act = np.linalg.solve(lap, rhs)
+        disp[active_idx] = z_act
+
+        if ref_mask is not None:
+            rm = np.asarray(ref_mask, dtype=bool) & valid_sess & np.isfinite(disp)
+            offset = float(np.nanmedian(disp[rm])) if np.any(rm) else float(np.nanmedian(disp[active_idx]))
+        else:
+            offset = float(np.nanmedian(disp[active_idx]))
+        disp[active_idx] -= offset
+
+    return {
+        "displacement_um": disp,
+        "pairwise_lags_um": pair_lags,
+        "pairwise_corrs": pair_corrs,
+    }
+
+
+def fit_chronic_settling_trajectory(
+    days: np.ndarray,
+    pos_um: np.ndarray,
+    plateau_min_day: float = 35.0,
+) -> dict[str, Any]:
+    """Fit exponential relaxation + chronic plateau stability metrics on longitudinal drift.
+
+    Centers ``pos_um`` to ``0.0 um`` at the ``days >= plateau_min_day`` median so early
+    post-surgical settling and late-chronic plateau scatter share a common reference frame.
+    """
+    d_arr = np.asarray(days, dtype=np.float64)
+    p_arr = np.asarray(pos_um, dtype=np.float64)
+    if d_arr.shape != p_arr.shape:
+        raise ValueError(f"Shape mismatch: days {d_arr.shape} vs pos_um {p_arr.shape}")
+
+    fin = np.isfinite(d_arr) & np.isfinite(p_arr)
+    centered = np.full_like(p_arr, np.nan, dtype=np.float64)
+    fit_curve = np.full_like(p_arr, np.nan, dtype=np.float64)
+    if int(fin.sum()) < 4:
+        return {
+            "n_sessions": int(fin.sum()),
+            "centered_um": centered,
+            "fit_um": fit_curve,
+        }
+
+    order = np.argsort(d_arr[fin])
+    d_fin = d_arr[fin][order]
+    p_fin = p_arr[fin][order]
+    plat_mask = d_fin >= float(plateau_min_day)
+    ref_med = float(np.median(p_fin[plat_mask])) if np.any(plat_mask) else float(np.median(p_fin))
+    c_fin = p_fin - ref_med
+    centered[fin] = p_arr[fin] - ref_med
+
+    d0 = float(d_fin[0])
+
+    def _exp_model(x: np.ndarray, y_inf: float, amp: float, tau: float) -> np.ndarray:
+        return y_inf - amp * np.exp(-(x - d0) / tau)
+
+    p0 = (0.0, float(-c_fin[0]), 12.0)
+    try:
+        popt, _ = optimize.curve_fit(
+            _exp_model,
+            d_fin,
+            c_fin,
+            p0=p0,
+            bounds=([-250.0, -2500.0, 1.0], [250.0, 2500.0, 250.0]),
+            maxfev=5000,
+        )
+        y_inf, amp, tau = float(popt[0]), float(popt[1]), float(popt[2])
+    except Exception:
+        y_inf, amp, tau = 0.0, float(-c_fin[0]), 15.0
+
+    y_hat_fin = _exp_model(d_fin, y_inf, amp, tau)
+    fit_curve[fin] = _exp_model(d_arr[fin], y_inf, amp, tau)
+    ss_res = float(np.sum((c_fin - y_hat_fin) ** 2))
+    ss_tot = float(np.sum((c_fin - np.mean(c_fin)) ** 2))
+    fit_r2 = 1.0 - ss_res / max(ss_tot, 1e-12)
+    fit_rmse = float(np.sqrt(ss_res / max(d_fin.size, 1)))
+
+    plat_vals = c_fin[plat_mask] if np.any(plat_mask) else c_fin
+    plat_days = d_fin[plat_mask] if np.any(plat_mask) else d_fin
+    plat_med = float(np.median(plat_vals))
+    q25, q75 = np.percentile(plat_vals, [25.0, 75.0])
+    step_diffs = np.abs(np.diff(plat_vals))
+    if plat_days.size >= 3 and np.ptp(plat_days) > 0:
+        lr = stats.linregress(plat_days, plat_vals)
+        slope_30d = float(lr.slope * 30.0)
+        slope_p = float(lr.pvalue)
+    else:
+        slope_30d, slope_p = 0.0, 1.0
+
+    return {
+        "n_sessions": int(d_fin.size),
+        "n_plateau_sessions": int(plat_vals.size),
+        "day_start": d0,
+        "day_end": float(d_fin[-1]),
+        "plateau_ref_um": ref_med,
+        "initial_observed_um": float(c_fin[0]),
+        "total_excursion_um": float(np.ptp(c_fin)),
+        "exp_y_inf_um": y_inf,
+        "exp_amp_um": amp,
+        "exp_start_to_asymp_um": float(y_hat_fin[0] - y_inf),
+        "tau_days": tau,
+        "t95_days": float(d0 + tau * np.log(20.0)),
+        "fit_r2": float(fit_r2),
+        "fit_rmse_um": fit_rmse,
+        "plateau_iqr_um": float(q75 - q25),
+        "plateau_mad_um": float(np.median(np.abs(plat_vals - plat_med))),
+        "plateau_rms_um": float(np.sqrt(np.mean(plat_vals ** 2))),
+        "plateau_range_um": float(np.ptp(plat_vals)),
+        "step_abs_median_um": float(np.median(step_diffs)) if step_diffs.size else 0.0,
+        "plateau_slope_um_per_30d": slope_30d,
+        "plateau_slope_p": slope_p,
+        "centered_um": centered,
+        "fit_um": fit_curve,
     }

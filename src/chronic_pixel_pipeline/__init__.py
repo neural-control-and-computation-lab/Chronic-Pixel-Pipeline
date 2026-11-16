@@ -29,7 +29,12 @@ from .probe_geometry import (
 )
 from .recording import SpikeGadgetsNPXRecording, SpikeGadgetsNPXRecordingSegment
 from .preprocessing import preprocess, remove_bad_channels
-from .drift import extract_bank_spike_cloud, load_ks4_drift_trace
+from .drift import (
+    extract_bank_spike_cloud,
+    fit_chronic_settling_trajectory,
+    load_ks4_drift_trace,
+    register_1d_profiles_across_sessions,
+)
 from .waveforms import (
     compute_spike_train_biophysics,
     compute_waveform_celltype_metrics,
@@ -82,6 +87,8 @@ __all__ = [
     "preprocess",
     "load_ks4_drift_trace",
     "extract_bank_spike_cloud",
+    "register_1d_profiles_across_sessions",
+    "fit_chronic_settling_trajectory",
     "extract_2col_spatial_footprint",
     "compute_waveform_celltype_metrics",
     "compute_spike_train_biophysics",

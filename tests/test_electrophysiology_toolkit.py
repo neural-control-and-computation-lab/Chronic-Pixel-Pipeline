@@ -14,7 +14,12 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from chronic_pixel_pipeline.ccg import compute_jitter_corrected_ccgs
-from chronic_pixel_pipeline.drift import extract_bank_spike_cloud, load_ks4_drift_trace
+from chronic_pixel_pipeline.drift import (
+    extract_bank_spike_cloud,
+    fit_chronic_settling_trajectory,
+    load_ks4_drift_trace,
+    register_1d_profiles_across_sessions,
+)
 from chronic_pixel_pipeline.kinematics import (
     compute_movement_onset_peths,
     compute_neuron_dropping_curve,
@@ -48,6 +53,28 @@ class TestDriftAndWaveforms(unittest.TestCase):
             cloud = extract_bank_spike_cloud(bdir, bank_index=3, p_neural_min=None)
             # Must NOT double-add 3 * 3840 = 11520
             self.assertTrue(11520.0 <= float(np.min(cloud["depth_um"])) < float(np.max(cloud["depth_um"])) <= 15360.0)
+
+    def test_1d_profile_registration_and_settling_fit(self) -> None:
+        days = np.array([10, 14, 18, 24, 32, 45, 70, 110, 160, 210, 260], dtype=float)
+        # Exponential settling of -320 um at Day 10 with tau = 11 d reaching 0 um plateau
+        true_pos = -320.0 * np.exp(-(days - 10.0) / 11.0)
+        y = np.arange(0.0, 2400.0, 20.0)
+        profiles = np.zeros((days.size, y.size), dtype=float)
+        for i, p_um in enumerate(true_pos):
+            profiles[i] = (
+                1.0 * np.exp(-0.5 * ((y - (800.0 + p_um)) / 80.0) ** 2)
+                + 0.7 * np.exp(-0.5 * ((y - (1550.0 + p_um)) / 60.0) ** 2)
+            )
+        reg = register_1d_profiles_across_sessions(
+            profiles, pitch_um=20.0, max_disp_um=500.0, ref_mask=(days >= 45)
+        )
+        est = reg["displacement_um"]
+        self.assertLess(float(np.max(np.abs(est - true_pos))), 6.0)
+
+        fit = fit_chronic_settling_trajectory(days, est, plateau_min_day=45.0)
+        self.assertGreater(fit["fit_r2"], 0.99)
+        self.assertAlmostEqual(fit["tau_days"], 11.0, delta=2.0)
+        self.assertLess(fit["plateau_iqr_um"], 3.0)
 
     def test_footprint_celltype_and_biophysics(self) -> None:
         n_samp, n_ch = 90, 20
