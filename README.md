@@ -458,6 +458,17 @@ scratch/                     # One-off analyses (gitignored)
 | `plot_timecourse_dashboard(result, ...)` | Timecourse visualization |
 | `plot_best_windows(result, ...)` | Deep-dive on best time windows |
 
+### Longitudinal Electrophysiology & Free-Behavior Toolkit (`neuroresource-2026`)
+
+| Module | Key Functions | Purpose |
+|--------|---------------|---------|
+| `chronic_pixel_pipeline.drift` | `load_ks4_drift_trace`, `extract_bank_spike_cloud` | Kilosort4 `ops.npy` `dshift` extraction & normalized multi-bank spike drift clouds |
+| `chronic_pixel_pipeline.waveforms` | `extract_2col_spatial_footprint`, `compute_waveform_celltype_metrics`, `compute_spike_train_biophysics` | Two-column multichannel waveform footprints, 10x spline width (`narrow`/`broad`) classification, burst index, `CV2`, `±25 ms` ACG |
+| `chronic_pixel_pipeline.ccg` | `compute_jitter_corrected_ccgs` | Exact 25-ms interval jitter-corrected cross-correlograms with `7 SD` flank significance (`monosynaptic_exc`, `synchronous_0ms`, `inhibitory_trough`) |
+| `chronic_pixel_pipeline.lfp` | `compute_bipolar_depth_psd_map` | Range-4 artifact-screened within-column bipolar Welch LFP spectrograms (`1–100 Hz`) & `1/f` aperiodic slope |
+| `chronic_pixel_pipeline.kinematics` | `detect_spontaneous_movement_bouts`, `compute_movement_onset_peths`, `compute_neuron_kinematic_lag_tuning`, `compute_neuron_dropping_curve` | Continuity-block-safe bout detection, movement PETHs, single-neuron lead/lag tuning, and blocked-CV Ridge neuron-dropping scaling |
+| `chronic_pixel_pipeline.plotting` | `plot_2col_footprint`, `plot_ccg_with_flanks`, `plot_shank_waveforms`, `plot_neuron_dropping`, `add_scalebar` | Reusable publication Matplotlib helpers |
+
 ## Probe Geometry
 
 Neuropixels NHP long probe (NP1032/NP1030):
